@@ -89,11 +89,13 @@ def wayback_urls(domain):
     - Increases timeout to 15 minutes (900s)
     - Prints a simple progress indicator in MB downloaded without extra deps
     - If an error occurs mid-download, returns URLs parsed from the data downloaded so far
+    - Uses collapse=urlkey to reduce duplicate snapshots at source
     """
     temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt')
     all_urls = []
 
-    api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original"
+    # collapse=urlkey returns only one record per unique URL (ignoring timestamps)
+    api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey"
 
     # We'll accumulate the response text progressively so we can parse partial results on failure
     response_text = ""
@@ -140,7 +142,8 @@ def wayback_urls(domain):
                 unique_urls.add(url)
 
         all_urls = list(unique_urls)
-        print(f"[*] Wayback: Found {len(all_urls)} unique URLs")
+        mb_downloaded = total_bytes / (1024 * 1024)
+        print(f"[*] Wayback: Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len(all_urls)} unique URLs")
 
         return all_urls
 
