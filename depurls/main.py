@@ -156,8 +156,6 @@ def wayback_urls(domain):
         config_name = config['name']
         config_desc = config['description']
         
-        print(f"[*] Wayback ({config_name}): Downloading {config_desc} (up to ~15 minutes)...")
-        
         # We'll accumulate the response text progressively so we can parse partial results on failure
         response_text = ""
         total_bytes = 0
@@ -176,11 +174,9 @@ def wayback_urls(domain):
                         if retry_count < max_retries:
                             wait_time = wait_times[retry_count]
                             retry_count += 1
-                            print(f"\n[!] Wayback ({config_name}): HTTP 504 Gateway Timeout - waiting {wait_time}s before retry {retry_count}/{max_retries}")
                             time.sleep(wait_time)
                             continue
                         else:
-                            print(f"\n[!] Wayback ({config_name}): HTTP 504 Gateway Timeout - max retries exceeded")
                             break
                     
                     if resp.status_code != 200:
@@ -214,14 +210,12 @@ def wayback_urls(domain):
                     
                 except requests.exceptions.Timeout:
                     # Parse partial data if any
-                    print(f"\n[!] Wayback ({config_name}): Request timed out after 15 minutes — using partial data")
                     break
                 except requests.exceptions.RequestException as e:
                     # Network errors - might be temporary
                     if retry_count < max_retries and "504" in str(e):
                         wait_time = wait_times[retry_count]
                         retry_count += 1
-                        print(f"\n[!] Wayback ({config_name}): Request error ({e}) - waiting {wait_time}s before retry {retry_count}/{max_retries}")
                         time.sleep(wait_time)
                         continue
                     else:
@@ -233,20 +227,13 @@ def wayback_urls(domain):
 
             # Parse and add URLs to the set
             lines = response_text.splitlines()
-            filtered_count = 0
             for line in lines:
                 url = line.strip()
                 if url and is_valid_domain_url(url, domain):
                     all_urls_set.add(url)
-                elif url:
-                    filtered_count += 1
-
-            mb_downloaded = total_bytes / (1024 * 1024)
-            print(f"[*] Wayback ({config_name}): Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len([l for l in lines if l.strip() and is_valid_domain_url(l.strip(), domain)])} URLs (filtered {filtered_count} non-matching)")
 
         except Exception as e:
             # Parse partial data if any
-            print(f"\n[!] Wayback ({config_name}): Error — using partial data if available ({str(e)})")
             if response_text:
                 lines = response_text.splitlines()
                 for line in lines:
@@ -256,7 +243,6 @@ def wayback_urls(domain):
 
     # Convert set to sorted list
     all_urls = sorted(list(all_urls_set))
-    print(f"[*] Wayback: Total unique URLs after merging both requests: {len(all_urls)}")
     return all_urls
 
 
@@ -268,7 +254,6 @@ def commoncrawl_urls(domain):
         coll = resp.json()
 
         all_urls = set()
-        print("[*] Common Crawl: Querying 5 recent indexes...")
 
         if isinstance(coll, list) and coll:
             recent_indexes = sorted(coll, key=lambda x: x.get('id', ''))[-5:]
@@ -336,7 +321,6 @@ def alienvault_urls(domain, api_key=None):
         headers = {}
         if api_key:
             headers['X-OTX-API-KEY'] = api_key
-            print("[*] AlienVault: Using API key for increased rate limits")
         
         while True:
             resp = requests.get(api, headers=headers if headers else None, timeout=900)
@@ -349,7 +333,6 @@ def alienvault_urls(domain, api_key=None):
                 
                 wait_time = wait_times[retry_count]
                 retry_count += 1
-                print(f"[!] AlienVault: Rate limited (HTTP 429) - waiting {wait_time}s ({wait_time//60}m) before retry {retry_count}/{max_retries}")
                 time.sleep(wait_time)
                 continue
             
@@ -422,7 +405,6 @@ def urlscan_urls(domain, api_key=None):
         data = resp.json()
 
         total = data.get('total', 0)
-        print(f"[*] URLScan: API reports {total} total results available")
 
         for result in data.get('results', []):
             try:
@@ -472,12 +454,10 @@ def urlscan_urls(domain, api_key=None):
                 else:
                     break
             except Exception as e:
-                print(f"[!] URLScan pagination error: {e}")
                 break
 
         if not all_urls:
             raise Exception("No scan results found for this domain")
-        print(f"[*] URLScan: Fetched {len(all_urls)} URLs from {page_count} page(s)")
         return all_urls
     except Exception as e:
         if "HTTP" in str(e) or "scan results" in str(e):
@@ -559,26 +539,53 @@ def shodan_urls(domain, api_key):
     all_urls = set()
     
     try:
-        # Search for the domain in Shodan
-        api_url = f"https://api.shodan.io/shodan/host/search?key={api_key}&query=hostname:{domain}"
-        resp = requests.get(api_url, timeout=900)
+        # Try multiple search strategies for better coverage
+        search_queries = [
+            f"hostname:{domain}",  # Exact hostname match
+            f"ssl:{domain}",        # SSL certificate match (often finds more results)
+            f"http.html:{domain}",  # Domain in HTML content
+        ]
         
-        if resp.status_code == 401:
-            raise Exception("HTTP 401 - Invalid API key")
-        elif resp.status_code == 403:
-            raise Exception("HTTP 403 - Access forbidden")
-        elif resp.status_code != 200:
-            raise Exception(f"HTTP {resp.status_code} - Request failed")
+        all_matches = []
         
-        data = resp.json()
-        matches = data.get('matches', [])
+        for query in search_queries:
+            try:
+                api_url = f"https://api.shodan.io/shodan/host/search?key={api_key}&query={query}"
+                resp = requests.get(api_url, timeout=900)
+                
+                if resp.status_code == 401:
+                    raise Exception("HTTP 401 - Invalid API key")
+                elif resp.status_code == 403:
+                    raise Exception("HTTP 403 - Access forbidden")
+                elif resp.status_code != 200:
+                    continue  # Try next query
+                
+                data = resp.json()
+                matches = data.get('matches', [])
+                
+                if matches:
+                    all_matches.extend(matches)
+                    
+            except Exception as e:
+                # If it's an auth error, stop trying
+                if "401" in str(e) or "403" in str(e):
+                    raise
+                # Otherwise continue with next query
+                continue
         
-        if not matches:
+        if not all_matches:
             raise Exception("No Shodan results found for this domain")
         
-        print(f"[*] Shodan: Processing {len(matches)} discovered services...")
+        # Remove duplicate matches by IP+port
+        seen_services = set()
+        unique_matches = []
+        for match in all_matches:
+            service_id = f"{match.get('ip_str', '')}:{match.get('port', 0)}"
+            if service_id not in seen_services:
+                seen_services.add(service_id)
+                unique_matches.append(match)
         
-        for match in matches:
+        for match in unique_matches:
             try:
                 # Get hostname and port
                 hostname = match.get('hostnames', [domain])[0] if match.get('hostnames') else domain
@@ -907,18 +914,19 @@ def main(argv=None):
     futures = {}
     service_status = {}
 
+    # Start all services with initial status
     if 'wayback' in providers:
-        print("[⏳] Wayback Machine: Running...")
+        print("[⏳] Wayback Machine...")
         service_status['wayback'] = 'running'
         futures['wayback'] = executor.submit(wayback_urls, domain)
 
     if 'commoncrawl' in providers:
-        print("[⏳] Common Crawl: Running...")
+        print("[⏳] Common Crawl...")
         service_status['commoncrawl'] = 'running'
         futures['commoncrawl'] = executor.submit(commoncrawl_urls, domain)
 
     if 'alienvault' in providers:
-        print("[⏳] AlienVault OTX: Running...")
+        print("[⏳] AlienVault OTX...")
         service_status['alienvault'] = 'running'
         alienvault_key = domain_config.get('ALIENVAULT_API_KEY', '')
         if not alienvault_key and config:
@@ -926,7 +934,7 @@ def main(argv=None):
         futures['alienvault'] = executor.submit(alienvault_urls, domain, alienvault_key)
 
     if 'urlscan' in providers:
-        print("[⏳] URLScan: Running...")
+        print("[⏳] URLScan...")
         service_status['urlscan'] = 'running'
         urlscan_key = domain_config.get('URLSCAN_API_KEY', '')
         if not urlscan_key and config:
@@ -938,11 +946,11 @@ def main(argv=None):
         if not vt_key and config:
             vt_key = getattr(config, "VT_API_KEY", "")
         if vt_key:
-            print("[⏳] VirusTotal: Running...")
+            print("[⏳] VirusTotal...")
             service_status['virustotal'] = 'running'
             futures['virustotal'] = executor.submit(virustotal_urls, domain, vt_key)
         else:
-            print("[⏭️] VirusTotal: Skipped (no API key configured)")
+            print("[⏭️] VirusTotal: Skipped (no API key)")
             service_status['virustotal'] = 'skipped'
 
     if 'shodan' in providers:
@@ -950,15 +958,16 @@ def main(argv=None):
         if not shodan_key and config:
             shodan_key = getattr(config, "SHODAN_API_KEY", "")
         if shodan_key:
-            print("[⏳] Shodan: Running...")
+            print("[⏳] Shodan...")
             service_status['shodan'] = 'running'
             futures['shodan'] = executor.submit(shodan_urls, domain, shodan_key)
         else:
-            print("[⏭️] Shodan: Skipped (no API key configured)")
+            print("[⏭️] Shodan: Skipped (no API key)")
             service_status['shodan'] = 'skipped'
 
-    print()  # Empty line for better readability
+    print()  # Empty line before results start appearing
 
+    # Process results as they complete
     for provider_name, future in futures.items():
         try:
             # All services now have 15 minute timeout
@@ -966,7 +975,7 @@ def main(argv=None):
             urls_list = future.result(timeout=timeout)
             
             if urls_list:
-                print(f"[✓] {provider_name.title()}: Completed - Found {len(urls_list)} URLs")
+                print(f"[✓] {provider_name.title()}: {len(urls_list)} URLs")
                 per_service_counts[provider_name] += len(urls_list)
                 service_status[provider_name] = f'completed ({len(urls_list)} URLs)'
 
@@ -976,50 +985,31 @@ def main(argv=None):
                             f.write(url.strip() + '\n')
                             raw_count += 1
             else:
-                print(f"[✗] {provider_name.title()}: Completed - Found 0 URLs")
+                print(f"[✗] {provider_name.title()}: 0 URLs")
                 service_status[provider_name] = 'completed (0 URLs)'
         except concurrent.futures.TimeoutError:
-            print(f"[✗] {provider_name.title()}: Failed - Timeout after 15 minutes")
+            print(f"[✗] {provider_name.title()}: Timeout (15min)")
             service_status[provider_name] = 'timeout (15min)'
         except Exception as e:
             error_msg = str(e)
-            print(f"[✗] {provider_name.title()}: Failed - {error_msg}")
+            print(f"[✗] {provider_name.title()}: {error_msg}")
             service_status[provider_name] = f'error ({error_msg})'
 
     executor.shutdown(wait=True)
     
-    # Print final status summary
-    print("\n" + "="*60)
-    print("[=] Service Execution Summary:")
-    print("="*60)
-    for svc in providers:
-        status = service_status.get(svc, 'unknown')
-        count = per_service_counts.get(svc, 0)
-        if 'completed' in status and count > 0:
-            print(f"  [✓] {svc.title():<20} {status}")
-        elif 'completed' in status and count == 0:
-            print(f"  [✗] {svc.title():<20} {status}")
-        elif status == 'skipped':
-            print(f"  [⏭️] {svc.title():<20} {status}")
-        else:
-            print(f"  [✗] {svc.title():<20} {status}")
-    print("="*60 + "\n")
-
     print('\n[=] Deduplicating URLs...')
     
     # Load existing URLs from output file if it exists
     existing_urls = set()
     if os.path.exists(output_path):
-        print(f"[*] Output file exists, loading existing URLs to avoid duplicates...")
         try:
             with open(output_path, 'r') as f:
                 for line in f:
                     url = line.rstrip()
                     if url:
                         existing_urls.add(url)
-            print(f"[*] Loaded {len(existing_urls)} existing URLs from {output_path}")
         except Exception as e:
-            print(f"[!] Warning: Could not read existing file: {e}")
+            pass
     
     # Deduplicate and merge with existing URLs
     try:
@@ -1040,17 +1030,15 @@ def main(argv=None):
                 with open(output_path, 'a') as f:
                     for url in sorted(unique_new_urls):
                         f.write(url + '\n')
-                print(f"[*] Appended {len(unique_new_urls)} new unique URLs to {output_path}")
-                print(f"[*] Total URLs in file: {len(existing_urls) + len(unique_new_urls)}")
+                print(f"[+] Added {len(unique_new_urls)} new URLs (Total: {len(existing_urls) + len(unique_new_urls)})")
             else:
-                print(f"[*] No new URLs to append (all URLs already exist in {output_path})")
-                print(f"[*] Total URLs in file: {len(existing_urls)}")
+                print(f"[*] No new URLs (Total: {len(existing_urls)})")
         else:
             # New file: write all unique URLs
             with open(output_path, 'w') as f:
                 for url in sorted(new_urls):
                     f.write(url + '\n')
-            print(f"[*] Saved {len(new_urls)} unique URLs to {output_path}")
+            print(f"[+] Saved {len(new_urls)} URLs to {output_path}")
     except Exception as e:
         print(f'[!] Deduplication error: {e}')
         print('[!] Falling back to system sort deduplication')
@@ -1058,11 +1046,10 @@ def main(argv=None):
             res = subprocess.run(['sort', '-u', raw_path, '-o', output_path], check=False)
             if res.returncode == 0:
                 final_count = sum(1 for _ in open(output_path))
-                print(f"[*] Saved {final_count} unique URLs to {output_path}")
+                print(f"[+] Saved {final_count} URLs")
             else:
                 raise RuntimeError('sort returned non-zero')
         except Exception:
-            print('[!] System sort also failed — using basic Python deduplication')
             seen = set()
             final_count = 0
             with open(raw_path, 'r') as rf, open(output_path, 'w') as of:
@@ -1072,12 +1059,7 @@ def main(argv=None):
                         of.write(u + "\n")
                         seen.add(u)
                         final_count += 1
-            print(f"[*] Saved {final_count} unique URLs to {output_path}")
-
-    print('\n[Summary] Total URLs found per service:')
-    for svc, cnt in per_service_counts.items():
-        if svc in providers:
-            print(f"  {svc}: {cnt}")
+            print(f"[+] Saved {final_count} URLs")
 
     try:
         if os.path.exists(raw_path):
