@@ -414,7 +414,8 @@ def urlscan_urls(domain, api_key=None):
     try:
         size = 1000
 
-        api = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}"
+        # Use page.domain: for more precise matching (URLs actually on that domain)
+        api = f"https://urlscan.io/api/v1/search/?q=page.domain:{domain}&size={size}"
         headers = {}
         if api_key:
             headers['API-Key'] = api_key
@@ -466,7 +467,7 @@ def urlscan_urls(domain, api_key=None):
                 sort_value = last_result.get('sort', [])
                 if len(sort_value) >= 2:
                     search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
-                    api_paginated = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}{search_after}"
+                    api_paginated = f"https://urlscan.io/api/v1/search/?q=page.domain:{domain}&size={size}{search_after}"
 
                     # Connection timeout: 60s, Reduced read timeout: 120s for pagination
                     resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 120))
