@@ -104,10 +104,6 @@ def setup_domain_config(domain):
     shodan_key = input(f"  Shodan API Key [{config['api_keys'].get('SHODAN_API_KEY', 'not set')}]: ").strip()
     if shodan_key:
         config['api_keys']['SHODAN_API_KEY'] = shodan_key
-    
-    censys_key = input(f"  Censys API Key (format: censys_ID_SECRET) [{config['api_keys'].get('CENSYS_API_KEY', 'not set')}]: ").strip()
-    if censys_key:
-        config['api_keys']['CENSYS_API_KEY'] = censys_key
 
     print(f"\nDiscord Webhook for {domain}:")
     discord_webhook = input(f"  Webhook URL [{config['webhooks'].get(domain, 'not set')}]: ").strip()
@@ -651,190 +647,6 @@ def virustotal_urls(domain, api_key):
         raise Exception(f"Request failed - {str(e)}")
 
 
-def censys_urls(domain, api_key):
-    """Fetch URLs from Censys by discovering hosts and web services.
-    
-    Searches for hosts with the domain in their names, then constructs
-    URLs from discovered services and extracts URLs from HTTP data.
-    
-    API key format: censys_<API_ID>_<API_SECRET> or <API_ID>:<API_SECRET>
-    """
-    all_urls = set()
-    
-    try:
-        # Parse API key
-        # Format 1: censys_<API_ID>_<API_SECRET>
-        # Format 2: <API_ID>:<API_SECRET>
-        if api_key.startswith('censys_'):
-            parts = api_key.split('_', 2)
-            if len(parts) != 3:
-                raise Exception("Invalid Censys API key format (expected: censys_<API_ID>_<API_SECRET> or <API_ID>:<API_SECRET>)")
-            api_id = parts[1]
-            api_secret = parts[2]
-        elif ':' in api_key:
-            parts = api_key.split(':', 1)
-            if len(parts) != 2:
-                raise Exception("Invalid Censys API key format (expected: censys_<API_ID>_<API_SECRET> or <API_ID>:<API_SECRET>)")
-            api_id = parts[0]
-            api_secret = parts[1]
-        else:
-            raise Exception("Invalid Censys API key format (expected: censys_<API_ID>_<API_SECRET> or <API_ID>:<API_SECRET>)")
-        
-        # Search for hosts with the domain
-        # Use simpler query for free plan compatibility
-        search_query = f"services.tls.certificates.leaf_data.names: {domain}"
-        api_url = "https://search.censys.io/api/v2/hosts/search"
-        
-        headers = {
-            'Accept': 'application/json'
-        }
-        
-        params = {
-            'q': search_query,
-            'per_page': 100  # Free plan allows up to 100 results
-        }
-        
-        # Connection timeout: 60s, Read timeout: 120s
-        resp = requests.get(
-            api_url,
-            auth=(api_id, api_secret),
-            headers=headers,
-            params=params,
-            timeout=(60, 120)
-        )
-        
-        if resp.status_code == 401:
-            raise Exception(f"HTTP 401 - Invalid Censys API credentials. Get your API ID and Secret from https://search.censys.io/account/api")
-        elif resp.status_code == 403:
-            raise Exception("HTTP 403 - Access forbidden or quota exceeded")
-        elif resp.status_code == 429:
-            raise Exception("HTTP 429 - Rate limit exceeded (Free plan: 0.2 tokens/second)")
-        elif resp.status_code == 400:
-            raise Exception(f"HTTP 400 - Bad request. Check query syntax or free plan limitations")
-        elif resp.status_code != 200:
-            raise Exception(f"HTTP {resp.status_code} - Request failed")
-        
-        data = resp.json()
-        results = data.get('result', {}).get('hits', [])
-        
-        if not results:
-            raise Exception("No hosts found for this domain in Censys")
-        
-        # Extract URLs from each host
-        for hit in results:
-            try:
-                ip = hit.get('ip', '')
-                services = hit.get('services', [])
-                names = hit.get('name', [])
-                
-                # Get domain names associated with this host
-                host_names = []
-                if isinstance(names, list):
-                    host_names.extend(names)
-                elif isinstance(names, str):
-                    host_names.append(names)
-                
-                # Also check DNS names
-                dns_names = hit.get('dns', {}).get('names', [])
-                if dns_names:
-                    host_names.extend(dns_names)
-                
-                # Filter to only domain-matching hostnames
-                valid_hostnames = []
-                for hostname in host_names:
-                    if hostname and (hostname == domain or hostname.endswith('.' + domain)):
-                        valid_hostnames.append(hostname)
-                
-                # If no valid hostnames, use domain itself
-                if not valid_hostnames:
-                    valid_hostnames = [domain]
-                
-                # Extract URLs from services
-                for service in services:
-                    try:
-                        port = service.get('port', 0)
-                        service_name = service.get('service_name', '').lower()
-                        
-                        # Determine protocol
-                        if service_name in ('https', 'http'):
-                            protocol = service_name
-                        elif port == 443:
-                            protocol = 'https'
-                        elif port == 80:
-                            protocol = 'http'
-                        elif 'tls' in service.get('transport_protocol', '').lower():
-                            protocol = 'https'
-                        else:
-                            # Skip non-HTTP services
-                            continue
-                        
-                        # Create base URLs for each valid hostname
-                        for hostname in valid_hostnames:
-                            if port in (80, 443):
-                                base_url = f"{protocol}://{hostname}"
-                            else:
-                                base_url = f"{protocol}://{hostname}:{port}"
-                            
-                            if is_valid_domain_url(base_url, domain):
-                                all_urls.add(base_url)
-                        
-                        # Extract URLs from HTTP response data
-                        http_data = service.get('http', {}).get('response', {})
-                        
-                        # Get URLs from HTML
-                        html = http_data.get('html_title', '') or http_data.get('body', '')
-                        if html:
-                            import re
-                            # Extract URLs from HTML
-                            url_patterns = [
-                                r'href=["\']([^"\']+)["\']',
-                                r'src=["\']([^"\']+)["\']',
-                                r'https?://[^\s<>"\']+',
-                            ]
-                            
-                            for pattern in url_patterns:
-                                found_urls = re.findall(pattern, str(html), re.IGNORECASE)
-                                for url in found_urls:
-                                    if url.startswith('http') and is_valid_domain_url(url, domain):
-                                        all_urls.add(url)
-                        
-                        # Check headers for Location
-                        headers_data = http_data.get('headers', {})
-                        if isinstance(headers_data, dict):
-                            location = headers_data.get('Location') or headers_data.get('location')
-                            if location:
-                                for hostname in valid_hostnames:
-                                    if port in (80, 443):
-                                        base_url = f"{protocol}://{hostname}"
-                                    else:
-                                        base_url = f"{protocol}://{hostname}:{port}"
-                                    
-                                    if location.startswith('http'):
-                                        if is_valid_domain_url(location, domain):
-                                            all_urls.add(location)
-                                    elif location.startswith('/'):
-                                        full_url = base_url + location
-                                        if is_valid_domain_url(full_url, domain):
-                                            all_urls.add(full_url)
-                                    break
-                        
-                    except Exception:
-                        continue
-                        
-            except Exception:
-                continue
-        
-        if not all_urls:
-            raise Exception("No URLs extracted from Censys data")
-        
-        return list(all_urls)
-        
-    except Exception as e:
-        if "HTTP" in str(e) or "No" in str(e) or "Invalid" in str(e):
-            raise
-        raise Exception(f"Request failed - {str(e)}")
-
-
 def shodan_urls(domain, api_key):
     """Fetch URLs from Shodan by discovering web services on the domain.
     
@@ -1136,11 +948,11 @@ def parse_args():
     parser.add_argument('-o', '--output', dest='output', help='Output file path for URLs')
     parser.add_argument('-w', '--workers', type=int, default=5, help='Number of concurrent worker threads')
     parser.add_argument('-p', '--providers', nargs='+',
-                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'censys', 'all'],
+                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'all'],
                         default=['all'],
                         help='Providers to use for URL collection (default: all)')
     parser.add_argument('-e', '--exclude', nargs='+',
-                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'censys'],
+                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan'],
                         default=[],
                         help='Providers to exclude from URL collection')
     return parser.parse_args()
@@ -1185,7 +997,7 @@ def main(argv=None):
 
     providers = args.providers
     if 'all' in providers:
-        providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'censys']
+        providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan']
     else:
         providers = list(set(providers))
     
@@ -1216,7 +1028,6 @@ def main(argv=None):
         'urlscan': 0,
         'virustotal': 0,
         'shodan': 0,
-        'censys': 0,
     }
 
     raw_count = 0
@@ -1284,18 +1095,6 @@ def main(argv=None):
         else:
             print("[⏭️] Shodan: Skipped (no API key)")
             service_status['shodan'] = 'skipped'
-
-    if 'censys' in providers:
-        censys_key = domain_config.get('CENSYS_API_KEY', '')
-        if not censys_key and config:
-            censys_key = getattr(config, "CENSYS_API_KEY", "")
-        if censys_key:
-            print("[⏳] Censys...")
-            service_status['censys'] = 'running'
-            futures['censys'] = executor.submit(censys_urls, domain, censys_key)
-        else:
-            print("[⏭️] Censys: Skipped (no API key)")
-            service_status['censys'] = 'skipped'
 
     print()  # Empty line before results start appearing
 
