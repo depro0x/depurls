@@ -119,136 +119,141 @@ def get_domain_config(domain):
 def wayback_urls(domain):
     """Fetch URLs from the Wayback Machine CDX API.
 
-    - Increases timeout to 15 minutes (900s)
+    - Increases timeout to 15 minutes (900s) per request
     - Prints a simple progress indicator in MB downloaded without extra deps
     - If an error occurs mid-download, returns URLs parsed from the data downloaded so far
-    - Uses collapse=urlkey to reduce duplicate snapshots at source
+    - Fetches URLs TWICE: once with collapse=urlkey, once without collapse
+    - Sorts and deduplicates at file level to maximize unique URL collection
     - Filters URLs to only include target domain and subdomains
     - Retries on HTTP 504 Gateway Timeout errors
     """
-    temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt')
-    all_urls = []
-
-    # collapse=urlkey returns only one record per unique URL (ignoring timestamps)
-    api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey"
-
-    # We'll accumulate the response text progressively so we can parse partial results on failure
-    response_text = ""
-    total_bytes = 0
-    start_time = time.time()
-    last_print = start_time
+    all_urls_set = set()
     
+    # We'll fetch twice: with collapse and without collapse
+    fetch_configs = [
+        {
+            'name': 'collapsed',
+            'api': f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey",
+            'description': 'with collapse=urlkey (unique URLs only)'
+        },
+        {
+            'name': 'full',
+            'api': f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original",
+            'description': 'without collapse (all snapshots)'
+        }
+    ]
+
     # Retry configuration for 504 errors
     max_retries = 3
-    retry_count = 0
     wait_times = [60, 120, 240]  # 1min, 2min, 4min
+    
+    for config in fetch_configs:
+        api = config['api']
+        config_name = config['name']
+        config_desc = config['description']
+        
+        print(f"[*] Wayback ({config_name}): Downloading {config_desc} (up to ~15 minutes)...")
+        
+        # We'll accumulate the response text progressively so we can parse partial results on failure
+        response_text = ""
+        total_bytes = 0
+        start_time = time.time()
+        last_print = start_time
+        retry_count = 0
 
-    try:
-        print("[*] Wayback: Downloading and processing data (up to ~15 minutes)...")
+        try:
+            while retry_count <= max_retries:
+                try:
+                    # 15 minutes timeout
+                    resp = requests.get(api, timeout=900, stream=True)
 
-        while retry_count <= max_retries:
-            try:
-                # 15 minutes timeout
-                resp = requests.get(api, timeout=900, stream=True)
+                    if resp.status_code == 504:
+                        # Gateway Timeout - retry
+                        if retry_count < max_retries:
+                            wait_time = wait_times[retry_count]
+                            retry_count += 1
+                            print(f"\n[!] Wayback ({config_name}): HTTP 504 Gateway Timeout - waiting {wait_time}s before retry {retry_count}/{max_retries}")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            print(f"\n[!] Wayback ({config_name}): HTTP 504 Gateway Timeout - max retries exceeded")
+                            break
+                    
+                    if resp.status_code != 200:
+                        if resp.status_code == 404:
+                            raise Exception(f"HTTP 404 - Domain not found in Wayback archive")
+                        elif resp.status_code == 403:
+                            raise Exception(f"HTTP 403 - Access forbidden")
+                        else:
+                            raise Exception(f"HTTP {resp.status_code} - Request failed")
 
-                if resp.status_code == 504:
-                    # Gateway Timeout - retry
-                    if retry_count < max_retries:
+                    # Success - process the response
+                    for chunk in resp.iter_content(chunk_size=131072, decode_unicode=True):  # 128 KiB
+                        if not chunk:
+                            continue
+                        response_text += chunk
+                        chunk_bytes = len(chunk.encode('utf-8'))
+                        total_bytes += chunk_bytes
+
+                        # Lightweight progress: MB downloaded and speed
+                        now = time.time()
+                        if now - last_print >= 1.0:
+                            mb = total_bytes / (1024 * 1024)
+                            elapsed = max(now - start_time, 0.001)
+                            speed = mb / elapsed  # MB/s
+                            msg = f"[Wayback ({config_name})] Downloaded: {mb:.2f} MB | {speed:.2f} MB/s | Elapsed: {int(elapsed)}s"
+                            print("\r" + msg, end="", flush=True)
+                            last_print = now
+                    
+                    # Break out of retry loop on success
+                    break
+                    
+                except requests.exceptions.Timeout:
+                    # Parse partial data if any
+                    print(f"\n[!] Wayback ({config_name}): Request timed out after 15 minutes — using partial data")
+                    break
+                except requests.exceptions.RequestException as e:
+                    # Network errors - might be temporary
+                    if retry_count < max_retries and "504" in str(e):
                         wait_time = wait_times[retry_count]
                         retry_count += 1
-                        print(f"\n[!] Wayback: HTTP 504 Gateway Timeout - waiting {wait_time}s before retry {retry_count}/{max_retries}")
+                        print(f"\n[!] Wayback ({config_name}): Request error ({e}) - waiting {wait_time}s before retry {retry_count}/{max_retries}")
                         time.sleep(wait_time)
                         continue
                     else:
-                        print(f"\n[!] Wayback: HTTP 504 Gateway Timeout - max retries exceeded")
-                        return []
-                
-                if resp.status_code != 200:
-                    if resp.status_code == 404:
-                        raise Exception(f"HTTP 404 - Domain not found in Wayback archive")
-                    elif resp.status_code == 403:
-                        raise Exception(f"HTTP 403 - Access forbidden")
-                    else:
-                        raise Exception(f"HTTP {resp.status_code} - Request failed")
-                    return []
+                        raise
 
-                # Success - process the response
-                for chunk in resp.iter_content(chunk_size=131072, decode_unicode=True):  # 128 KiB
-                    if not chunk:
-                        continue
-                    response_text += chunk
-                    chunk_bytes = len(chunk.encode('utf-8'))
-                    total_bytes += chunk_bytes
+            # Final newline after progress updates
+            if total_bytes > 0:
+                print()
 
-                    # Lightweight progress: MB downloaded and speed
-                    now = time.time()
-                    if now - last_print >= 1.0:
-                        mb = total_bytes / (1024 * 1024)
-                        elapsed = max(now - start_time, 0.001)
-                        speed = mb / elapsed  # MB/s
-                        msg = f"[Wayback] Downloaded: {mb:.2f} MB | {speed:.2f} MB/s | Elapsed: {int(elapsed)}s"
-                        print("\r" + msg, end="", flush=True)
-                        last_print = now
-                
-                # Break out of retry loop on success
-                break
-                
-            except requests.exceptions.Timeout:
-                # Parse partial data if any
-                print("\n[!] Wayback: Request timed out after 15 minutes — using partial data")
-                if response_text:
-                    lines = response_text.splitlines()
-                    unique_urls = {line.strip() for line in lines if line.strip() and is_valid_domain_url(line.strip(), domain)}
-                    return list(unique_urls)
-                return all_urls
-            except requests.exceptions.RequestException as e:
-                # Network errors - might be temporary
-                if retry_count < max_retries and "504" in str(e):
-                    wait_time = wait_times[retry_count]
-                    retry_count += 1
-                    print(f"\n[!] Wayback: Request error ({e}) - waiting {wait_time}s before retry {retry_count}/{max_retries}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise
-
-        # Final newline after progress updates
-        if total_bytes > 0:
-            print()
-
-        lines = response_text.splitlines()
-        unique_urls = set()
-        filtered_count = 0
-        for line in lines:
-            url = line.strip()
-            if url and is_valid_domain_url(url, domain):
-                unique_urls.add(url)
-            elif url:
-                filtered_count += 1
-
-        all_urls = list(unique_urls)
-        mb_downloaded = total_bytes / (1024 * 1024)
-        print(f"[*] Wayback: Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len(all_urls)} unique URLs (filtered {filtered_count} non-matching)")
-
-        return all_urls
-
-    except Exception as e:
-        # Parse partial data if any
-        print(f"\n[!] Wayback: Error — using partial data if available ({str(e)})")
-        if response_text:
+            # Parse and add URLs to the set
             lines = response_text.splitlines()
-            unique_urls = {line.strip() for line in lines if line.strip() and is_valid_domain_url(line.strip(), domain)}
-            return list(unique_urls)
-        return all_urls
-    finally:
-        try:
-            temp_file.close()
-        except Exception:
-            pass
-        try:
-            os.unlink(temp_file.name)
-        except Exception:
-            pass
+            filtered_count = 0
+            for line in lines:
+                url = line.strip()
+                if url and is_valid_domain_url(url, domain):
+                    all_urls_set.add(url)
+                elif url:
+                    filtered_count += 1
+
+            mb_downloaded = total_bytes / (1024 * 1024)
+            print(f"[*] Wayback ({config_name}): Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len([l for l in lines if l.strip() and is_valid_domain_url(l.strip(), domain)])} URLs (filtered {filtered_count} non-matching)")
+
+        except Exception as e:
+            # Parse partial data if any
+            print(f"\n[!] Wayback ({config_name}): Error — using partial data if available ({str(e)})")
+            if response_text:
+                lines = response_text.splitlines()
+                for line in lines:
+                    url = line.strip()
+                    if url and is_valid_domain_url(url, domain):
+                        all_urls_set.add(url)
+
+    # Convert set to sorted list
+    all_urls = sorted(list(all_urls_set))
+    print(f"[*] Wayback: Total unique URLs after merging both requests: {len(all_urls)}")
+    return all_urls
 
 
 def commoncrawl_urls(domain):
