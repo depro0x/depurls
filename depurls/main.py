@@ -92,6 +92,10 @@ def setup_domain_config(domain):
     alienvault_key = input(f"  AlienVault OTX API Key [{config['api_keys'].get('ALIENVAULT_API_KEY', 'not set')}]: ").strip()
     if alienvault_key:
         config['api_keys']['ALIENVAULT_API_KEY'] = alienvault_key
+    
+    shodan_key = input(f"  Shodan API Key [{config['api_keys'].get('SHODAN_API_KEY', 'not set')}]: ").strip()
+    if shodan_key:
+        config['api_keys']['SHODAN_API_KEY'] = shodan_key
 
     print(f"\nDiscord Webhook for {domain}:")
     discord_webhook = input(f"  Webhook URL [{config['webhooks'].get(domain, 'not set')}]: ").strip()
@@ -544,6 +548,127 @@ def virustotal_urls(domain, api_key):
         raise Exception(f"Request failed - {str(e)}")
 
 
+def shodan_urls(domain, api_key):
+    """Fetch URLs from Shodan by discovering web services on the domain.
+    
+    Extracts URLs from:
+    - HTTP response HTML (href links, src attributes)
+    - HTTP headers (Location redirects, Link headers)
+    - Hostnames/subdomains running web services
+    """
+    all_urls = set()
+    
+    try:
+        # Search for the domain in Shodan
+        api_url = f"https://api.shodan.io/shodan/host/search?key={api_key}&query=hostname:{domain}"
+        resp = requests.get(api_url, timeout=900)
+        
+        if resp.status_code == 401:
+            raise Exception("HTTP 401 - Invalid API key")
+        elif resp.status_code == 403:
+            raise Exception("HTTP 403 - Access forbidden")
+        elif resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code} - Request failed")
+        
+        data = resp.json()
+        matches = data.get('matches', [])
+        
+        if not matches:
+            raise Exception("No Shodan results found for this domain")
+        
+        print(f"[*] Shodan: Processing {len(matches)} discovered services...")
+        
+        for match in matches:
+            try:
+                # Get hostname and port
+                hostname = match.get('hostnames', [domain])[0] if match.get('hostnames') else domain
+                port = match.get('port', 80)
+                ip = match.get('ip_str', '')
+                
+                # Determine protocol
+                if port == 443 or 'ssl' in str(match.get('ssl', '')):
+                    protocol = 'https'
+                else:
+                    protocol = 'http'
+                
+                # Base URL
+                if port in [80, 443]:
+                    base_url = f"{protocol}://{hostname}"
+                else:
+                    base_url = f"{protocol}://{hostname}:{port}"
+                
+                # Add base URL if it's valid
+                if is_valid_domain_url(base_url, domain):
+                    all_urls.add(base_url)
+                
+                # Extract from HTTP data
+                http_data = match.get('http', {})
+                
+                # Get URL from location header (redirects)
+                location = http_data.get('location', '')
+                if location:
+                    if location.startswith('http'):
+                        if is_valid_domain_url(location, domain):
+                            all_urls.add(location)
+                    else:
+                        # Relative URL
+                        full_url = base_url + location
+                        if is_valid_domain_url(full_url, domain):
+                            all_urls.add(full_url)
+                
+                # Parse HTML for URLs
+                html = http_data.get('html', '')
+                if html:
+                    import re
+                    # Extract href and src attributes
+                    url_patterns = [
+                        r'href=["\']([^"\']+)["\']',
+                        r'src=["\']([^"\']+)["\']',
+                        r'action=["\']([^"\']+)["\']',
+                    ]
+                    
+                    for pattern in url_patterns:
+                        found_urls = re.findall(pattern, html, re.IGNORECASE)
+                        for url in found_urls:
+                            # Skip anchors, javascript, data URIs
+                            if url.startswith(('#', 'javascript:', 'data:', 'mailto:')):
+                                continue
+                            
+                            # Handle absolute URLs
+                            if url.startswith('http'):
+                                if is_valid_domain_url(url, domain):
+                                    all_urls.add(url)
+                            # Handle protocol-relative URLs
+                            elif url.startswith('//'):
+                                full_url = f"{protocol}:{url}"
+                                if is_valid_domain_url(full_url, domain):
+                                    all_urls.add(full_url)
+                            # Handle root-relative URLs
+                            elif url.startswith('/'):
+                                full_url = base_url + url
+                                if is_valid_domain_url(full_url, domain):
+                                    all_urls.add(full_url)
+                            # Handle relative URLs
+                            elif not url.startswith('http'):
+                                full_url = base_url + '/' + url
+                                if is_valid_domain_url(full_url, domain):
+                                    all_urls.add(full_url)
+                
+            except Exception as e:
+                # Skip individual service errors, continue processing others
+                continue
+        
+        if not all_urls:
+            raise Exception("No URLs extracted from Shodan data")
+        
+        return list(all_urls)
+        
+    except Exception as e:
+        if "HTTP" in str(e) or "No" in str(e):
+            raise
+        raise Exception(f"Request failed - {str(e)}")
+
+
 def update_tool():
     """Update depurls to the latest version from GitHub."""
     print("[*] Updating depurls to the latest version...")
@@ -601,7 +726,7 @@ def parse_args():
     parser.add_argument('-o', '--output', dest='output', help='Output file path for URLs')
     parser.add_argument('-w', '--workers', type=int, default=5, help='Number of concurrent worker threads')
     parser.add_argument('-p', '--providers', nargs='+',
-                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'all'],
+                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'all'],
                         default=['all'],
                         help='Providers to use for URL collection (default: all)')
     return parser.parse_args()
@@ -646,7 +771,7 @@ def main(argv=None):
 
     providers = args.providers
     if 'all' in providers:
-        providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal']
+        providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan']
     else:
         providers = list(set(providers))
 
@@ -669,6 +794,7 @@ def main(argv=None):
         'alienvault': 0,
         'urlscan': 0,
         'virustotal': 0,
+        'shodan': 0,
     }
 
     raw_count = 0
@@ -723,6 +849,18 @@ def main(argv=None):
         else:
             print("[⏭️] VirusTotal: Skipped (no API key configured)")
             service_status['virustotal'] = 'skipped'
+
+    if 'shodan' in providers:
+        shodan_key = domain_config.get('SHODAN_API_KEY', '')
+        if not shodan_key and config:
+            shodan_key = getattr(config, "SHODAN_API_KEY", "")
+        if shodan_key:
+            print("[⏳] Shodan: Running...")
+            service_status['shodan'] = 'running'
+            futures['shodan'] = executor.submit(shodan_urls, domain, shodan_key)
+        else:
+            print("[⏭️] Shodan: Skipped (no API key configured)")
+            service_status['shodan'] = 'skipped'
 
     print()  # Empty line for better readability
 
