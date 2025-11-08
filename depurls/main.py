@@ -675,46 +675,141 @@ def update_tool():
     print("[*] Fetching from: https://github.com/depro0x/depurls.git\n")
     
     try:
-        # Use pip to upgrade from GitHub
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", 
-             "git+https://github.com/depro0x/depurls.git"],
-            capture_output=True,
-            text=True,
-            timeout=900
+        # Detect if running from local development directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.abspath(os.path.join(script_dir, os.pardir))
+        is_git_repo = os.path.exists(os.path.join(repo_root, '.git'))
+        
+        # Check if installed via pipx by looking at the Python executable path or script location
+        is_pipx = (
+            '.local/pipx/venvs' in sys.executable or 
+            'pipx/venvs' in sys.executable or
+            '.local/share/pipx' in sys.executable or
+            '.local/pipx' in script_dir or
+            'pipx/venvs' in script_dir
         )
         
-        if result.returncode == 0:
-            print("[+] Update successful!")
-            print("\n[*] Output:")
-            print(result.stdout)
+        if is_pipx:
+            print("[*] Detected pipx installation")
+            print("[*] Running: pipx install --force git+https://github.com/depro0x/depurls.git\n")
             
-            # Try to get the new version
-            try:
-                from depurls import __version__
-                print(f"[+] Current version: {__version__}")
-            except:
-                pass
+            result = subprocess.run(
+                ['pipx', 'install', '--force', 'git+https://github.com/depro0x/depurls.git'],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
             
-            print("\n[!] Note: If you installed with pipx, use: pipx upgrade depurls")
-            print("[!]       or: pipx install --force git+https://github.com/depro0x/depurls.git")
+            if result.returncode == 0:
+                print("[+] Update successful!")
+                print("\n[*] Output:")
+                print(result.stdout)
+                print("\n[+] depurls has been updated to the latest version")
+            else:
+                print("[!] Update failed!")
+                print("\n[*] Error output:")
+                print(result.stderr)
+                print("\n[*] Try manually:")
+                print("    pipx install --force git+https://github.com/depro0x/depurls.git")
+                sys.exit(1)
+                
+        elif is_git_repo:
+            print("[*] Detected local git repository")
+            print(f"[*] Repository path: {repo_root}\n")
+            
+            # Git pull to update
+            print("[*] Running: git pull origin main")
+            result = subprocess.run(
+                ['git', 'pull', 'origin', 'main'],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode == 0:
+                print("[+] Update successful!")
+                print("\n[*] Output:")
+                print(result.stdout)
+                
+                # Check if there were actual changes
+                if "Already up to date" in result.stdout or "Already up-to-date" in result.stdout:
+                    print("[*] You already have the latest version!")
+                else:
+                    print("[+] Repository updated with latest changes")
+                    
+                    # Reinstall in editable mode if using pip
+                    print("\n[*] Reinstalling package...")
+                    reinstall = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "-e", repo_root],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if reinstall.returncode == 0:
+                        print("[+] Package reinstalled successfully")
+                    else:
+                        print("[!] Warning: Could not reinstall package")
+                        print(f"[!] You may need to run: pip install -e {repo_root}")
+            else:
+                print("[!] Git pull failed!")
+                print("\n[*] Error output:")
+                print(result.stderr)
+                print("\n[*] Try manually:")
+                print(f"    cd {repo_root}")
+                print("    git pull origin main")
+                sys.exit(1)
         else:
-            print("[!] Update failed!")
-            print("\n[*] Error output:")
-            print(result.stderr)
-            print("\n[*] Try manually:")
-            print("    pip install --upgrade git+https://github.com/depro0x/depurls.git")
-            print("    or for pipx:")
-            print("    pipx install --force git+https://github.com/depro0x/depurls.git")
-            sys.exit(1)
+            # Regular pip installation
+            print("[*] Installing from GitHub repository via pip")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall",
+                 "git+https://github.com/depro0x/depurls.git"],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode == 0:
+                print("[+] Update successful!")
+                print("\n[*] Output:")
+                print(result.stdout)
+                
+                # Try to get the new version
+                try:
+                    from depurls import __version__
+                    print(f"[+] Current version: {__version__}")
+                except:
+                    pass
+            else:
+                print("[!] Update failed!")
+                print("\n[*] Error output:")
+                print(result.stderr)
+                print("\n[*] Try manually:")
+                print("    pip install --upgrade --force-reinstall git+https://github.com/depro0x/depurls.git")
+                sys.exit(1)
             
     except subprocess.TimeoutExpired:
-        print("[!] Update timed out after 2 minutes")
+        print("[!] Update timed out")
+        sys.exit(1)
+    except FileNotFoundError as e:
+        if 'pipx' in str(e):
+            print("[!] pipx not found in PATH")
+            print("[*] Please install pipx or update manually:")
+            print("    pipx install --force git+https://github.com/depro0x/depurls.git")
+        else:
+            print(f"[!] Update error: {e}")
+            print("\n[*] Try manually:")
+            print("    pipx install --force git+https://github.com/depro0x/depurls.git")
         sys.exit(1)
     except Exception as e:
         print(f"[!] Update error: {e}")
         print("\n[*] Try manually:")
-        print("    pip install --upgrade git+https://github.com/depro0x/depurls.git")
+        if 'pipx' in sys.executable or 'pipx' in os.path.dirname(os.path.abspath(__file__)):
+            print("    pipx install --force git+https://github.com/depro0x/depurls.git")
+        else:
+            print("    cd /path/to/depurls && git pull origin main")
+            print("    or: pip install --upgrade git+https://github.com/depro0x/depurls.git")
         sys.exit(1)
 
 
