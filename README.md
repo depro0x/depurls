@@ -45,6 +45,7 @@ depurls -d target.com -o output/urls.txt
 | `-d, --domain` | Target domain (required for collection or setup) |
 | `-o, --output` | Output file to write unique URLs (required) |
 | `--setup` | Interactive setup to store API keys & per-domain webhook |
+| `--update` | Update depurls to the latest version from GitHub |
 | `-w, --workers` | Concurrent worker threads (default 5) |
 | `-p, --providers` | One or more of: `wayback commoncrawl alienvault urlscan virustotal all` |
 
@@ -66,6 +67,10 @@ depurls -d example.com -o urls.txt -w 10
 Setup config (API keys + webhook for a domain):
 ```bash
 depurls --setup -d example.com
+```
+Update to latest version:
+```bash
+depurls --update
 ```
 
 ## Configuration & API Keys

@@ -381,9 +381,59 @@ def virustotal_urls(domain, api_key):
         return []
 
 
+def update_tool():
+    """Update depurls to the latest version from GitHub."""
+    print("[*] Updating depurls to the latest version...")
+    print("[*] Fetching from: https://github.com/depro0x/depurls.git\n")
+    
+    try:
+        # Use pip to upgrade from GitHub
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", 
+             "git+https://github.com/depro0x/depurls.git"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            print("[+] Update successful!")
+            print("\n[*] Output:")
+            print(result.stdout)
+            
+            # Try to get the new version
+            try:
+                from depurls import __version__
+                print(f"[+] Current version: {__version__}")
+            except:
+                pass
+            
+            print("\n[!] Note: If you installed with pipx, use: pipx upgrade depurls")
+            print("[!]       or: pipx install --force git+https://github.com/depro0x/depurls.git")
+        else:
+            print("[!] Update failed!")
+            print("\n[*] Error output:")
+            print(result.stderr)
+            print("\n[*] Try manually:")
+            print("    pip install --upgrade git+https://github.com/depro0x/depurls.git")
+            print("    or for pipx:")
+            print("    pipx install --force git+https://github.com/depro0x/depurls.git")
+            sys.exit(1)
+            
+    except subprocess.TimeoutExpired:
+        print("[!] Update timed out after 2 minutes")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[!] Update error: {e}")
+        print("\n[*] Try manually:")
+        print("    pip install --upgrade git+https://github.com/depro0x/depurls.git")
+        sys.exit(1)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Collect URLs for a domain')
     parser.add_argument('--setup', action='store_true', help='Setup configuration for a domain')
+    parser.add_argument('--update', action='store_true', help='Update depurls to the latest version from GitHub')
     parser.add_argument('-d', '--domain', help='Target domain')
     parser.add_argument('-o', '--output', dest='output', help='Output file path for URLs')
     parser.add_argument('-w', '--workers', type=int, default=5, help='Number of concurrent worker threads')
@@ -396,6 +446,10 @@ def parse_args():
 
 def main(argv=None):
     args = parse_args() if argv is None else parse_args()
+
+    if args.update:
+        update_tool()
+        return
 
     if args.setup:
         if not args.domain:
