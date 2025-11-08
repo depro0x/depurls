@@ -164,7 +164,12 @@ def wayback_urls(domain):
                         return []
                 
                 if resp.status_code != 200:
-                    print(f"[!] Wayback: HTTP {resp.status_code}")
+                    if resp.status_code == 404:
+                        raise Exception(f"HTTP 404 - Domain not found in Wayback archive")
+                    elif resp.status_code == 403:
+                        raise Exception(f"HTTP 403 - Access forbidden")
+                    else:
+                        raise Exception(f"HTTP {resp.status_code} - Request failed")
                     return []
 
                 # Success - process the response
@@ -299,11 +304,12 @@ def commoncrawl_urls(domain):
                 continue
 
         if not all_urls:
-            print("[!] Common Crawl: No URLs found (domain may not be in recent crawls)")
+            raise Exception("Domain not found in recent Common Crawl indexes")
         return list(all_urls)
     except Exception as e:
-        print(f"[!] Common Crawl: Error - {e}")
-        return []
+        if "Domain not found" in str(e):
+            raise
+        raise Exception(f"Request failed - {str(e)}")
 
 
 def alienvault_urls(domain, api_key=None):
@@ -329,7 +335,7 @@ def alienvault_urls(domain, api_key=None):
             if resp.status_code == 429:
                 # Rate limited - wait and retry
                 if retry_count >= max_retries:
-                    print(f"[!] AlienVault: Rate limited (HTTP 429) - max retries exceeded")
+                    raise Exception(f"HTTP 429 - Rate limit exceeded after {max_retries} retries")
                     break
                 
                 wait_time = wait_times[retry_count]
@@ -340,9 +346,11 @@ def alienvault_urls(domain, api_key=None):
             
             if resp.status_code != 200:
                 if resp.status_code == 404:
-                    print("[!] AlienVault: Domain not found in OTX database")
+                    raise Exception(f"HTTP 404 - Domain not found in OTX database")
+                elif resp.status_code == 403:
+                    raise Exception(f"HTTP 403 - Invalid or expired API key")
                 else:
-                    print(f"[!] AlienVault: HTTP {resp.status_code}")
+                    raise Exception(f"HTTP {resp.status_code} - Request failed")
                 break
 
             # Reset retry count on success
@@ -371,11 +379,12 @@ def alienvault_urls(domain, api_key=None):
             time.sleep(1)
 
         if not all_urls:
-            print("[!] AlienVault: No URLs found (domain may not have threat intelligence data)")
+            raise Exception("No threat intelligence data available for this domain")
         return all_urls
     except Exception as e:
-        print(f"[!] AlienVault: Error - {e}")
-        return []
+        if "HTTP" in str(e) or "threat intelligence" in str(e):
+            raise
+        raise Exception(f"Request failed - {str(e)}")
 
 
 def urlscan_urls(domain, api_key=None):
@@ -391,7 +400,14 @@ def urlscan_urls(domain, api_key=None):
 
         resp = requests.get(api, headers=headers or None, timeout=900)
         if resp.status_code != 200:
-            print(f"[!] URLScan: HTTP {resp.status_code}")
+            if resp.status_code == 401:
+                raise Exception(f"HTTP 401 - Invalid API key")
+            elif resp.status_code == 429:
+                raise Exception(f"HTTP 429 - Rate limit exceeded")
+            elif resp.status_code == 404:
+                raise Exception(f"HTTP 404 - Domain not found")
+            else:
+                raise Exception(f"HTTP {resp.status_code} - Request failed")
             return []
 
         data = resp.json()
@@ -450,11 +466,14 @@ def urlscan_urls(domain, api_key=None):
                 print(f"[!] URLScan pagination error: {e}")
                 break
 
+        if not all_urls:
+            raise Exception("No scan results found for this domain")
         print(f"[*] URLScan: Fetched {len(all_urls)} URLs from {page_count} page(s)")
         return all_urls
     except Exception as e:
-        print(f"[!] URLScan: Error - {e}")
-        return []
+        if "HTTP" in str(e) or "scan results" in str(e):
+            raise
+        raise Exception(f"Request failed - {str(e)}")
 
 
 def virustotal_urls(domain, api_key):
@@ -482,14 +501,13 @@ def virustotal_urls(domain, api_key):
                 if url and is_valid_domain_url(url, domain):
                     all_urls.add(url)
         elif resp.status_code == 403:
-            print("[!] VirusTotal: API key invalid or rate limit exceeded")
-            return []
+            raise Exception(f"HTTP 403 - Invalid API key or rate limit exceeded")
         elif resp.status_code == 204:
-            print("[!] VirusTotal: Rate limit exceeded")
-            return []
+            raise Exception(f"HTTP 204 - Rate limit exceeded (quota depleted)")
+        elif resp.status_code == 404:
+            raise Exception(f"HTTP 404 - Domain not found in VirusTotal database")
         else:
-            print(f"[!] VirusTotal: HTTP {resp.status_code}")
-            return []
+            raise Exception(f"HTTP {resp.status_code} - Request failed")
 
         for subdomain in domains_to_check[1:]:
             try:
@@ -513,11 +531,12 @@ def virustotal_urls(domain, api_key):
                 continue
 
         if not all_urls:
-            print("[!] VirusTotal: No URLs found (domain may not be in VT database)")
+            raise Exception("No URL data available in VirusTotal database")
         return list(all_urls)
     except Exception as e:
-        print(f"[!] VirusTotal: Error - {e}")
-        return []
+        if "HTTP" in str(e) or "URL data" in str(e):
+            raise
+        raise Exception(f"Request failed - {str(e)}")
 
 
 def update_tool():
@@ -648,32 +667,41 @@ def main(argv=None):
     }
 
     raw_count = 0
+    
+    # Track execution start time
+    start_time = time.time()
 
     workers = getattr(args, 'workers', 5)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     write_lock = Lock()
 
     print(f"\n[=] Collecting URLs for: {domain}")
+    print(f"[=] Running {len(providers)} service(s) concurrently...\n")
 
     futures = {}
+    service_status = {}
 
     if 'wayback' in providers:
-        print("[*] Starting Wayback Machine...")
+        print("[⏳] Wayback Machine: Running...")
+        service_status['wayback'] = 'running'
         futures['wayback'] = executor.submit(wayback_urls, domain)
 
     if 'commoncrawl' in providers:
-        print("[*] Starting Common Crawl...")
+        print("[⏳] Common Crawl: Running...")
+        service_status['commoncrawl'] = 'running'
         futures['commoncrawl'] = executor.submit(commoncrawl_urls, domain)
 
     if 'alienvault' in providers:
-        print("[*] Starting AlienVault OTX...")
+        print("[⏳] AlienVault OTX: Running...")
+        service_status['alienvault'] = 'running'
         alienvault_key = domain_config.get('ALIENVAULT_API_KEY', '')
         if not alienvault_key and config:
             alienvault_key = getattr(config, "ALIENVAULT_API_KEY", "")
         futures['alienvault'] = executor.submit(alienvault_urls, domain, alienvault_key)
 
     if 'urlscan' in providers:
-        print("[*] Starting URLScan...")
+        print("[⏳] URLScan: Running...")
+        service_status['urlscan'] = 'running'
         urlscan_key = domain_config.get('URLSCAN_API_KEY', '')
         if not urlscan_key and config:
             urlscan_key = getattr(config, "URLSCAN_API_KEY", "")
@@ -684,10 +712,14 @@ def main(argv=None):
         if not vt_key and config:
             vt_key = getattr(config, "VT_API_KEY", "")
         if vt_key:
-            print("[*] Starting VirusTotal...")
+            print("[⏳] VirusTotal: Running...")
+            service_status['virustotal'] = 'running'
             futures['virustotal'] = executor.submit(virustotal_urls, domain, vt_key)
         else:
-            print("[!] Skipping VirusTotal (no API key)")
+            print("[⏭️] VirusTotal: Skipped (no API key configured)")
+            service_status['virustotal'] = 'skipped'
+
+    print()  # Empty line for better readability
 
     for provider_name, future in futures.items():
         try:
@@ -696,8 +728,9 @@ def main(argv=None):
             urls_list = future.result(timeout=timeout)
             
             if urls_list:
-                print(f"[+] {provider_name.title()}: Found {len(urls_list)} URLs")
+                print(f"[✓] {provider_name.title()}: Completed - Found {len(urls_list)} URLs")
                 per_service_counts[provider_name] += len(urls_list)
+                service_status[provider_name] = f'completed ({len(urls_list)} URLs)'
 
                 with write_lock:
                     with open(raw_path, 'a') as f:
@@ -705,13 +738,34 @@ def main(argv=None):
                             f.write(url.strip() + '\n')
                             raw_count += 1
             else:
-                print(f"[!] {provider_name.title()}: Found 0 URLs (check domain spelling, API keys, or rate limits)")
+                print(f"[✗] {provider_name.title()}: Completed - Found 0 URLs")
+                service_status[provider_name] = 'completed (0 URLs)'
         except concurrent.futures.TimeoutError:
-            print(f"[!] {provider_name.title()}: Timeout after 15 minutes")
+            print(f"[✗] {provider_name.title()}: Failed - Timeout after 15 minutes")
+            service_status[provider_name] = 'timeout (15min)'
         except Exception as e:
-            print(f"[!] {provider_name.title()}: Error - {str(e)}")
+            error_msg = str(e)
+            print(f"[✗] {provider_name.title()}: Failed - {error_msg}")
+            service_status[provider_name] = f'error ({error_msg})'
 
     executor.shutdown(wait=True)
+    
+    # Print final status summary
+    print("\n" + "="*60)
+    print("[=] Service Execution Summary:")
+    print("="*60)
+    for svc in providers:
+        status = service_status.get(svc, 'unknown')
+        count = per_service_counts.get(svc, 0)
+        if 'completed' in status and count > 0:
+            print(f"  [✓] {svc.title():<20} {status}")
+        elif 'completed' in status and count == 0:
+            print(f"  [✗] {svc.title():<20} {status}")
+        elif status == 'skipped':
+            print(f"  [⏭️] {svc.title():<20} {status}")
+        else:
+            print(f"  [✗] {svc.title():<20} {status}")
+    print("="*60 + "\n")
 
     print('\n[=] Deduplicating URLs...')
     
@@ -810,16 +864,45 @@ def main(argv=None):
             webhook_url = webhooks.get(default_channel, '')
 
         if webhook_url:
+            # Calculate execution time
+            end_time = time.time()
+            elapsed_seconds = int(end_time - start_time)
+            hours = elapsed_seconds // 3600
+            minutes = (elapsed_seconds % 3600) // 60
+            seconds = elapsed_seconds % 60
+            
+            if hours > 0:
+                time_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                time_str = f"{minutes}m {seconds}s"
+            else:
+                time_str = f"{seconds}s"
+            
+            # Count total and new unique URLs
             total_found = sum(per_service_counts.values())
             final_count = 0
             if os.path.exists(output_path):
                 with open(output_path, 'r') as f:
                     for _ in f:
                         final_count += 1
+            
+            # Calculate new unique URLs (from the deduplication step)
+            new_unique = len(unique_new_urls) if 'unique_new_urls' in locals() else 0
+            if not existing_urls:  # If it was a new file
+                new_unique = final_count
+            
+            # Build per-service breakdown
+            service_breakdown = "\n".join([f"  • {svc.title()}: {cnt}" for svc, cnt in per_service_counts.items() if svc in providers])
+            
             message = (
-                f"[+] URL collection finished for: {domain}\n"
-                f"Services total hits: {total_found}\n"
-                f"Unique URLs saved: {final_count}\n"
+                f"**🎯 URL Collection Complete**\n\n"
+                f"**Domain:** `{domain}`\n"
+                f"**Time:** {time_str}\n\n"
+                f"**Service Results:**\n{service_breakdown}\n"
+                f"**Total Found:** {total_found} URLs\n\n"
+                f"**Output:**\n"
+                f"  • New Unique: {new_unique}\n"
+                f"  • Total in File: {final_count}"
             )
 
             payload = {"content": message}
