@@ -275,20 +275,21 @@ def alienvault_urls(domain):
         page = 1
         retry_count = 0
         max_retries = 3
+        # Wait times: 1 minute, 2 minutes, 5 minutes
+        wait_times = [60, 120, 300]
         
         while True:
             resp = requests.get(api, timeout=900)
             
             if resp.status_code == 429:
                 # Rate limited - wait and retry
-                retry_count += 1
-                if retry_count > max_retries:
+                if retry_count >= max_retries:
                     print(f"[!] AlienVault: Rate limited (HTTP 429) - max retries exceeded")
                     break
                 
-                # Exponential backoff: 5s, 10s, 20s
-                wait_time = 5 * (2 ** (retry_count - 1))
-                print(f"[!] AlienVault: Rate limited (HTTP 429) - waiting {wait_time}s before retry {retry_count}/{max_retries}")
+                wait_time = wait_times[retry_count]
+                retry_count += 1
+                print(f"[!] AlienVault: Rate limited (HTTP 429) - waiting {wait_time}s ({wait_time//60}m) before retry {retry_count}/{max_retries}")
                 time.sleep(wait_time)
                 continue
             
