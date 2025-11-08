@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.build/
+
+# Env
+.env
+.venv/
+venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# Coverage / Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Mac / Linux trash
+.DS_Store
+*.swp
+*.swo

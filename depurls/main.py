@@ -1,0 +1,549 @@
+import os
+import requests
+import importlib.util
+import subprocess
+import time
+import tempfile
+import argparse
+import sys
+import concurrent.futures
+from threading import Lock
+import json
+from pathlib import Path
+
+
+def save_urls(urls, output_path):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w', buffering=1) as f:
+        for url in urls:
+            if url.strip():
+                f.write(url.strip() + '\n')
+
+
+def get_config_path():
+    config_dir = Path.home() / '.config' / 'depurls'
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir / 'config.json'
+
+
+def load_config():
+    config_path = get_config_path()
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(config):
+    config_path = get_config_path()
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+
+def setup_domain_config(domain):
+    config = load_config()
+
+    if 'api_keys' not in config:
+        config['api_keys'] = {}
+    if 'webhooks' not in config:
+        config['webhooks'] = {}
+
+    print(f"\n[*] Setting up configuration for domain: {domain}")
+    print("[*] Press Enter to skip any field and keep existing value\n")
+
+    print("API Keys (Universal):")
+    urlscan_key = input(f"  URLScan API Key [{config['api_keys'].get('URLSCAN_API_KEY', 'not set')}]: ").strip()
+    if urlscan_key:
+        config['api_keys']['URLSCAN_API_KEY'] = urlscan_key
+
+    vt_key = input(f"  VirusTotal API Key [{config['api_keys'].get('VT_API_KEY', 'not set')}]: ").strip()
+    if vt_key:
+        config['api_keys']['VT_API_KEY'] = vt_key
+
+    print(f"\nDiscord Webhook for {domain}:")
+    discord_webhook = input(f"  Webhook URL [{config['webhooks'].get(domain, 'not set')}]: ").strip()
+    if discord_webhook:
+        config['webhooks'][domain] = discord_webhook
+
+    save_config(config)
+    print(f"\n[+] Configuration saved to: {get_config_path()}")
+    print(f"[+] Configuration updated successfully!")
+
+
+def get_domain_config(domain):
+    config = load_config()
+    domain_config = {}
+
+    if 'api_keys' in config:
+        domain_config.update(config['api_keys'])
+
+    if 'webhooks' in config and domain in config['webhooks']:
+        domain_config['DISCORD_WEBHOOK'] = config['webhooks'][domain]
+
+    return domain_config
+
+
+def wayback_urls(domain):
+    temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt')
+    all_urls = []
+
+    try:
+        api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original"
+
+        print(f"[*] Wayback: Downloading and processing data (this may take several minutes)...")
+
+        resp = requests.get(api, timeout=1000, stream=True)
+
+        if resp.status_code != 200:
+            print(f"[!] Wayback: HTTP {resp.status_code}")
+            return []
+
+        response_text = ""
+        total_bytes = 0
+
+        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=True):
+            if chunk:
+                response_text += chunk
+                chunk_bytes = len(chunk.encode('utf-8'))
+                total_bytes += chunk_bytes
+
+        lines = response_text.splitlines()
+        unique_urls = set()
+
+        for line in lines:
+            url = line.strip()
+            if url:
+                unique_urls.add(url)
+
+        all_urls = list(unique_urls)
+        print(f"[*] Wayback: Found {len(all_urls)} unique URLs")
+
+        temp_file.close()
+        try:
+            os.unlink(temp_file.name)
+        except:
+            pass
+
+        return all_urls
+
+    except requests.exceptions.Timeout:
+        print("[!] Wayback: Request timed out after 10 minutes")
+        temp_file.close()
+        try:
+            os.unlink(temp_file.name)
+        except:
+            pass
+        return all_urls
+    except Exception as e:
+        print(f"[!] Wayback: Error - {str(e)}")
+        temp_file.close()
+        try:
+            os.unlink(temp_file.name)
+        except:
+            pass
+        return all_urls
+
+
+def commoncrawl_urls(domain):
+    try:
+        import json
+        collinfo_url = "https://index.commoncrawl.org/collinfo.json"
+        resp = requests.get(collinfo_url, timeout=30)
+        coll = resp.json()
+
+        all_urls = set()
+
+        if isinstance(coll, list) and coll:
+            recent_indexes = sorted(coll, key=lambda x: x.get('id', ''))[-5:]
+        else:
+            recent_indexes = [
+                {'id': 'CC-MAIN-2024-51'},
+                {'id': 'CC-MAIN-2024-46'},
+                {'id': 'CC-MAIN-2024-42'},
+                {'id': 'CC-MAIN-2024-38'},
+                {'id': 'CC-MAIN-2024-33'}
+            ]
+
+        for index in recent_indexes:
+            try:
+                cdx_api = index.get('cdx-api', '')
+                if not cdx_api:
+                    index_id = index.get('id', 'CC-MAIN-2024-10')
+                    cdx_api = f"https://index.commoncrawl.org/{index_id}-index"
+
+                index_url = f"{cdx_api}?url=*.{domain}/*&output=json&fl=url"
+
+                resp = requests.get(index_url, timeout=30, stream=True)
+
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if 'url' in obj:
+                            all_urls.add(obj['url'])
+                    except Exception:
+                        if '"url":"' in line:
+                            try:
+                                url = line.split('"url":"')[1].split('"')[0]
+                                all_urls.add(url)
+                            except Exception:
+                                pass
+            except Exception:
+                continue
+
+        return list(all_urls)
+    except Exception:
+        return []
+
+
+def alienvault_urls(domain):
+    all_urls = []
+    api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page=1"
+
+    try:
+        page = 1
+        while True:
+            resp = requests.get(api, timeout=1000)
+            if resp.status_code != 200:
+                break
+
+            data = resp.json()
+            url_list = data.get('url_list', [])
+
+            if not url_list:
+                break
+
+            all_urls.extend([entry['url'] for entry in url_list])
+
+            has_next = data.get('has_next', False)
+            if not has_next:
+                break
+
+            page += 1
+            api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}"
+
+        return all_urls
+    except Exception:
+        return []
+
+
+def urlscan_urls(domain, api_key=None):
+    all_urls = []
+
+    try:
+        size = 1000
+
+        api = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}"
+        headers = {}
+        if api_key:
+            headers['API-Key'] = api_key
+
+        resp = requests.get(api, headers=headers or None, timeout=30)
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json()
+
+        total = data.get('total', 0)
+
+        for result in data.get('results', []):
+            try:
+                all_urls.append(result['task']['url'])
+            except:
+                continue
+
+        page_count = 1
+        max_pages = 100
+
+        while len(all_urls) < total and page_count < max_pages:
+            try:
+                results = data.get('results', [])
+                if not results:
+                    break
+
+                last_result = results[-1]
+                sort_value = last_result.get('sort', [])
+                if len(sort_value) >= 2:
+                    search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
+                    api_paginated = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}{search_after}"
+
+                    resp = requests.get(api_paginated, headers=headers or None, timeout=30)
+                    if resp.status_code != 200:
+                        break
+
+                    data = resp.json()
+
+                    page_results = 0
+                    for result in data.get('results', []):
+                        try:
+                            all_urls.append(result['task']['url'])
+                            page_results += 1
+                        except:
+                            continue
+
+                    page_count += 1
+
+                    if page_results == 0:
+                        break
+                else:
+                    break
+            except Exception:
+                break
+
+        return all_urls
+    except Exception:
+        return []
+
+
+def virustotal_urls(domain, api_key):
+    all_urls = set()
+    domains_to_check = [domain]
+
+    try:
+        api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={domain}"
+        resp = requests.get(api, timeout=30)
+
+        if resp.status_code == 200:
+            data = resp.json()
+
+            subdomains = data.get('subdomains', [])
+            if subdomains:
+                domains_to_check.extend(subdomains[:50])
+
+            for url_entry in data.get('detected_urls', []):
+                url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
+                if url:
+                    all_urls.add(url)
+
+            for url_entry in data.get('undetected_urls', []):
+                url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
+                if url:
+                    all_urls.add(url)
+
+        for subdomain in domains_to_check[1:]:
+            try:
+                time.sleep(0.5)
+                api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={subdomain}"
+                resp = requests.get(api, timeout=30)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+
+                    for url_entry in data.get('detected_urls', []):
+                        url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
+                        if url:
+                            all_urls.add(url)
+
+                    for url_entry in data.get('undetected_urls', []):
+                        url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
+                        if url:
+                            all_urls.add(url)
+            except:
+                continue
+
+        return list(all_urls)
+    except Exception:
+        return []
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Collect URLs for a domain')
+    parser.add_argument('--setup', action='store_true', help='Setup configuration for a domain')
+    parser.add_argument('-d', '--domain', help='Target domain')
+    parser.add_argument('-o', '--output', dest='output', help='Output file path for URLs')
+    parser.add_argument('-w', '--workers', type=int, default=5, help='Number of concurrent worker threads')
+    parser.add_argument('-p', '--providers', nargs='+',
+                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'all'],
+                        default=['all'],
+                        help='Providers to use for URL collection (default: all)')
+    return parser.parse_args()
+
+
+def main(argv=None):
+    args = parse_args() if argv is None else parse_args()
+
+    if args.setup:
+        if not args.domain:
+            print("[!] Error: --setup requires -d/--domain argument")
+            sys.exit(1)
+        setup_domain_config(args.domain)
+        return
+
+    if not args.output:
+        print("[!] Error: -o/--output is required for URL collection")
+        sys.exit(1)
+
+    if not args.domain:
+        print("[!] Error: -d/--domain is required for URL collection")
+        sys.exit(1)
+
+    domain = args.domain
+    domain_config = get_domain_config(domain)
+    if domain_config:
+        print(f"[*] Loaded configuration for domain: {domain}")
+
+    # Try to import optional repo-level config.py if present (best-effort)
+    try:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        config_path = os.path.join(repo_root, "config.py")
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config)
+    except Exception:
+        config = None
+
+    providers = args.providers
+    if 'all' in providers:
+        providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal']
+    else:
+        providers = list(set(providers))
+
+    output_path = args.output
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    if output_dir:
+        raw_path = os.path.join(output_dir, "urls_raw.txt")
+    else:
+        raw_path = "urls_raw.txt"
+
+    open(raw_path, 'w').close()
+
+    per_service_counts = {
+        'wayback': 0,
+        'commoncrawl': 0,
+        'alienvault': 0,
+        'urlscan': 0,
+        'virustotal': 0,
+    }
+
+    raw_count = 0
+
+    workers = getattr(args, 'workers', 5)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    write_lock = Lock()
+
+    print(f"\n[=] Collecting URLs for: {domain}")
+
+    futures = {}
+
+    if 'wayback' in providers:
+        print("[*] Starting Wayback Machine...")
+        futures['wayback'] = executor.submit(wayback_urls, domain)
+
+    if 'commoncrawl' in providers:
+        print("[*] Starting Common Crawl...")
+        futures['commoncrawl'] = executor.submit(commoncrawl_urls, domain)
+
+    if 'alienvault' in providers:
+        print("[*] Starting AlienVault OTX...")
+        futures['alienvault'] = executor.submit(alienvault_urls, domain)
+
+    if 'urlscan' in providers:
+        print("[*] Starting URLScan...")
+        urlscan_key = domain_config.get('URLSCAN_API_KEY', '')
+        if not urlscan_key and config:
+            urlscan_key = getattr(config, "URLSCAN_API_KEY", "")
+        futures['urlscan'] = executor.submit(urlscan_urls, domain, urlscan_key)
+
+    if 'virustotal' in providers:
+        vt_key = domain_config.get('VT_API_KEY', '')
+        if not vt_key and config:
+            vt_key = getattr(config, "VT_API_KEY", "")
+        if vt_key:
+            print("[*] Starting VirusTotal...")
+            futures['virustotal'] = executor.submit(virustotal_urls, domain, vt_key)
+        else:
+            print("[!] Skipping VirusTotal (no API key)")
+
+    for provider_name, future in futures.items():
+        try:
+            urls_list = future.result(timeout=300)
+            if urls_list:
+                print(f"[+] {provider_name.title()}: Found {len(urls_list)} URLs")
+                per_service_counts[provider_name] += len(urls_list)
+
+                with write_lock:
+                    with open(raw_path, 'a') as f:
+                        for url in urls_list:
+                            f.write(url.strip() + '\n')
+                            raw_count += 1
+        except concurrent.futures.TimeoutError:
+            print(f"[!] {provider_name.title()}: Timeout after 5 minutes")
+        except Exception as e:
+            print(f"[!] {provider_name.title()}: Error - {str(e)}")
+
+    executor.shutdown(wait=True)
+
+    print('\n[=] Deduplicating URLs...')
+    try:
+        res = subprocess.run(['sort', '-u', raw_path, '-o', output_path], check=False)
+        if res.returncode == 0:
+            final_count = sum(1 for _ in open(output_path))
+            print(f"[*] Saved {final_count} unique URLs to {output_path}")
+        else:
+            raise RuntimeError('sort returned non-zero')
+    except Exception:
+        print('[!] System sort failed — using Python deduplication')
+        seen = set()
+        final_count = 0
+        with open(raw_path, 'r') as rf, open(output_path, 'w') as of:
+            for line in rf:
+                u = line.rstrip()
+                if u and u not in seen:
+                    of.write(u + "\n")
+                    seen.add(u)
+                    final_count += 1
+        print(f"[*] Saved {final_count} unique URLs to {output_path}")
+
+    print('\n[Summary] Total URLs found per service:')
+    for svc, cnt in per_service_counts.items():
+        if svc in providers:
+            print(f"  {svc}: {cnt}")
+
+    try:
+        if os.path.exists(raw_path):
+            os.unlink(raw_path)
+    except Exception:
+        pass
+
+    temp_dir = tempfile.gettempdir()
+    for filename in os.listdir(temp_dir):
+        if filename.startswith('wayback_') and filename.endswith('.txt'):
+            try:
+                os.unlink(os.path.join(temp_dir, filename))
+            except Exception:
+                pass
+
+    try:
+        webhook_url = domain_config.get('DISCORD_WEBHOOK', '')
+
+        if not webhook_url and config:
+            default_channel = getattr(config, 'DISCORD_DEFAULT_CHANNEL', '')
+            webhooks = getattr(config, 'DISCORD_WEBHOOKS', {})
+            webhook_url = webhooks.get(default_channel, '')
+
+        if webhook_url:
+            total_found = sum(per_service_counts.values())
+            final_count = 0
+            if os.path.exists(output_path):
+                with open(output_path, 'r') as f:
+                    for _ in f:
+                        final_count += 1
+            message = (
+                f"[+] URL collection finished for: {domain}\n"
+                f"Services total hits: {total_found}\n"
+                f"Unique URLs saved: {final_count}\n"
+            )
+
+            payload = {"content": message}
+            requests.post(webhook_url, json=payload, timeout=10)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()
