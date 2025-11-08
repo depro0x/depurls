@@ -53,9 +53,10 @@ depurls -d target.com -o output/urls.txt
 | `--setup` | Interactive setup to store API keys & per-domain webhook |
 | `--update` | Update depurls to the latest version from GitHub |
 | `-w, --workers` | Concurrent worker threads (default 5) |
-| `-p, --providers` | One or more of: `wayback commoncrawl alienvault urlscan virustotal all` |
+| `-p, --providers` | One or more of: `wayback commoncrawl alienvault urlscan virustotal shodan all` |
+| `-e, --exclude` | Exclude one or more providers from collection |
 
-If `all` is provided (default), all providers are queried. VirusTotal is only used when a VT API key is configured via `--setup`; otherwise it's skipped automatically.
+If `all` is provided (default), all providers are queried. VirusTotal and Shodan are only used when API keys are configured via `--setup`; otherwise they're skipped automatically.
 
 ### Terminal output example
 ```
@@ -86,13 +87,21 @@ If `all` is provided (default), all providers are queried. VirusTotal is only us
 ```
 
 ### Examples
-Collect using all default providers (VirusTotal included only if API key configured):
+Collect using all default providers (VirusTotal and Shodan included only if API keys configured):
 ```bash
 depurls -d example.com -o urls.txt
 ```
 Specify providers explicitly:
 ```bash
 depurls -d example.com -o urls.txt -p wayback alienvault
+```
+Exclude specific providers:
+```bash
+# Exclude Wayback Machine (use all others)
+depurls -d example.com -o urls.txt --exclude wayback
+
+# Exclude multiple providers
+depurls -d example.com -o urls.txt -e wayback commoncrawl shodan
 ```
 Increase workers:
 ```bash
@@ -116,6 +125,7 @@ During `--setup`, you can enter:
 - `URLSCAN_API_KEY` (for URLScan.io)
 - `VT_API_KEY` (for VirusTotal)
 - `ALIENVAULT_API_KEY` (for AlienVault OTX - bypasses rate limits)
+- `SHODAN_API_KEY` (for Shodan)
 - Discord webhook URL (saved per domain)
 
 Environment variables are not used. Configure API keys and webhooks via the interactive `--setup` flow.

@@ -847,6 +847,10 @@ def parse_args():
                         choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan', 'all'],
                         default=['all'],
                         help='Providers to use for URL collection (default: all)')
+    parser.add_argument('-e', '--exclude', nargs='+',
+                        choices=['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan'],
+                        default=[],
+                        help='Providers to exclude from URL collection')
     return parser.parse_args()
 
 
@@ -892,6 +896,13 @@ def main(argv=None):
         providers = ['wayback', 'commoncrawl', 'alienvault', 'urlscan', 'virustotal', 'shodan']
     else:
         providers = list(set(providers))
+    
+    # Apply exclusions
+    if args.exclude:
+        providers = [p for p in providers if p not in args.exclude]
+        if not providers:
+            print("[!] Error: All providers have been excluded. No services to run.")
+            sys.exit(1)
 
     output_path = args.output
 
