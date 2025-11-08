@@ -88,6 +88,10 @@ def setup_domain_config(domain):
     vt_key = input(f"  VirusTotal API Key [{config['api_keys'].get('VT_API_KEY', 'not set')}]: ").strip()
     if vt_key:
         config['api_keys']['VT_API_KEY'] = vt_key
+    
+    alienvault_key = input(f"  AlienVault OTX API Key [{config['api_keys'].get('ALIENVAULT_API_KEY', 'not set')}]: ").strip()
+    if alienvault_key:
+        config['api_keys']['ALIENVAULT_API_KEY'] = alienvault_key
 
     print(f"\nDiscord Webhook for {domain}:")
     discord_webhook = input(f"  Webhook URL [{config['webhooks'].get(domain, 'not set')}]: ").strip()
@@ -302,7 +306,7 @@ def commoncrawl_urls(domain):
         return []
 
 
-def alienvault_urls(domain):
+def alienvault_urls(domain, api_key=None):
     all_urls = []
     api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page=1"
 
@@ -313,8 +317,14 @@ def alienvault_urls(domain):
         # Wait times: 1 minute, 2 minutes, 5 minutes
         wait_times = [60, 120, 300]
         
+        # Setup headers with API key if provided
+        headers = {}
+        if api_key:
+            headers['X-OTX-API-KEY'] = api_key
+            print("[*] AlienVault: Using API key for increased rate limits")
+        
         while True:
-            resp = requests.get(api, timeout=900)
+            resp = requests.get(api, headers=headers if headers else None, timeout=900)
             
             if resp.status_code == 429:
                 # Rate limited - wait and retry
@@ -657,7 +667,10 @@ def main(argv=None):
 
     if 'alienvault' in providers:
         print("[*] Starting AlienVault OTX...")
-        futures['alienvault'] = executor.submit(alienvault_urls, domain)
+        alienvault_key = domain_config.get('ALIENVAULT_API_KEY', '')
+        if not alienvault_key and config:
+            alienvault_key = getattr(config, "ALIENVAULT_API_KEY", "")
+        futures['alienvault'] = executor.submit(alienvault_urls, domain, alienvault_key)
 
     if 'urlscan' in providers:
         print("[*] Starting URLScan...")

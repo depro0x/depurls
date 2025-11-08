@@ -11,6 +11,9 @@ Wayback Machine, Common Crawl, AlienVault OTX, urlscan.io, and (optionally) Viru
 ## Features
 - Parallel collection from multiple providers
 - Automatic deduplication (uses system `sort -u`, falls back to Python)
+- Append mode: preserves existing URLs and adds only new unique URLs to output file
+- Intelligent retry logic for HTTP 504 and rate limiting (429) errors
+- Domain filtering: only collects URLs from target domain and its subdomains
 - Simple local config file for API keys and per-domain Discord webhook notifications
 - Console entry point: `depurls` after installation
 
@@ -79,20 +82,30 @@ A JSON config file is stored at:
 ~/.config/depurls/config.json
 ```
 During `--setup`, you can enter:
-- `URLSCAN_API_KEY`
-- `VT_API_KEY` (VirusTotal)
+- `URLSCAN_API_KEY` (for URLScan.io)
+- `VT_API_KEY` (for VirusTotal)
+- `ALIENVAULT_API_KEY` (for AlienVault OTX - bypasses rate limits)
 - Discord webhook URL (saved per domain)
 
 Environment variables are not used. Configure API keys and webhooks via the interactive `--setup` flow.
 
 ## Output
-The final deduplicated list of URLs is written to the path passed to `-o/--output`. A temporary raw file is merged and removed. A summary is printed at the end and optionally sent to Discord if a webhook is configured.
+The final deduplicated list of URLs is written to the path passed to `-o/--output`. 
+
+**Append Mode:** If the output file already exists, depurls will load existing URLs and append only new unique URLs, preserving your historical data. This allows incremental URL collection over time without duplicates.
+
+A temporary raw file is merged and removed. A summary is printed at the end and optionally sent to Discord if a webhook is configured.
 
 ## VirusTotal Notes
 VirusTotal queries require an API key. Subdomain enumeration is limited to the first 50 discovered subdomains to stay within reasonable rate limits. Basic sleep delays are used; heavy usage may require backoff tuning.
 
+## AlienVault OTX Notes
+AlienVault OTX API has rate limits for unauthenticated requests. Providing an API key via `--setup` significantly increases rate limits and reduces HTTP 429 errors. Get your free API key at [otx.alienvault.com](https://otx.alienvault.com/).
+
+## Wayback Machine Notes
+The Wayback Machine CDX API can occasionally return HTTP 504 Gateway Timeout errors. depurls automatically retries up to 3 times with exponential backoff (1min, 2min, 4min) to handle temporary server issues.
+
 ## Limitations / Roadmap
-- Retry/backoff logic could be improved for network errors
 - Additional providers (Shodan crawled URLs, SecurityTrails, etc.)
 - Optional output formats (JSON, CSV)
 - Async implementation for higher throughput
