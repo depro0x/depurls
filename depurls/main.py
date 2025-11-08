@@ -182,6 +182,7 @@ def commoncrawl_urls(domain):
         coll = resp.json()
 
         all_urls = set()
+        print("[*] Common Crawl: Querying 5 recent indexes...")
 
         if isinstance(coll, list) and coll:
             recent_indexes = sorted(coll, key=lambda x: x.get('id', ''))[-5:]
@@ -222,8 +223,11 @@ def commoncrawl_urls(domain):
             except Exception:
                 continue
 
+        if not all_urls:
+            print("[!] Common Crawl: No URLs found (domain may not be in recent crawls)")
         return list(all_urls)
-    except Exception:
+    except Exception as e:
+        print(f"[!] Common Crawl: Error - {e}")
         return []
 
 
@@ -236,6 +240,10 @@ def alienvault_urls(domain):
         while True:
             resp = requests.get(api, timeout=1000)
             if resp.status_code != 200:
+                if resp.status_code == 404:
+                    print("[!] AlienVault: Domain not found in OTX database")
+                else:
+                    print(f"[!] AlienVault: HTTP {resp.status_code}")
                 break
 
             data = resp.json()
@@ -253,8 +261,11 @@ def alienvault_urls(domain):
             page += 1
             api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}"
 
+        if not all_urls:
+            print("[!] AlienVault: No URLs found (domain may not have threat intelligence data)")
         return all_urls
-    except Exception:
+    except Exception as e:
+        print(f"[!] AlienVault: Error - {e}")
         return []
 
 
@@ -357,6 +368,15 @@ def virustotal_urls(domain, api_key):
                 url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
                 if url:
                     all_urls.add(url)
+        elif resp.status_code == 403:
+            print("[!] VirusTotal: API key invalid or rate limit exceeded")
+            return []
+        elif resp.status_code == 204:
+            print("[!] VirusTotal: Rate limit exceeded")
+            return []
+        else:
+            print(f"[!] VirusTotal: HTTP {resp.status_code}")
+            return []
 
         for subdomain in domains_to_check[1:]:
             try:
@@ -379,8 +399,11 @@ def virustotal_urls(domain, api_key):
             except:
                 continue
 
+        if not all_urls:
+            print("[!] VirusTotal: No URLs found (domain may not be in VT database)")
         return list(all_urls)
-    except Exception:
+    except Exception as e:
+        print(f"[!] VirusTotal: Error - {e}")
         return []
 
 
@@ -552,7 +575,10 @@ def main(argv=None):
 
     for provider_name, future in futures.items():
         try:
-            urls_list = future.result(timeout=300)
+            # Wayback needs 15+ minutes, others are faster
+            timeout = 1000 if provider_name == 'wayback' else 300
+            urls_list = future.result(timeout=timeout)
+            
             if urls_list:
                 print(f"[+] {provider_name.title()}: Found {len(urls_list)} URLs")
                 per_service_counts[provider_name] += len(urls_list)
@@ -562,8 +588,11 @@ def main(argv=None):
                         for url in urls_list:
                             f.write(url.strip() + '\n')
                             raw_count += 1
+            else:
+                print(f"[!] {provider_name.title()}: Found 0 URLs (check domain spelling, API keys, or rate limits)")
         except concurrent.futures.TimeoutError:
-            print(f"[!] {provider_name.title()}: Timeout after 5 minutes")
+            timeout_mins = 16 if provider_name == 'wayback' else 5
+            print(f"[!] {provider_name.title()}: Timeout after {timeout_mins} minutes")
         except Exception as e:
             print(f"[!] {provider_name.title()}: Error - {str(e)}")
 
