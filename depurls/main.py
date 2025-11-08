@@ -237,8 +237,25 @@ def alienvault_urls(domain):
 
     try:
         page = 1
+        retry_count = 0
+        max_retries = 3
+        
         while True:
             resp = requests.get(api, timeout=900)
+            
+            if resp.status_code == 429:
+                # Rate limited - wait and retry
+                retry_count += 1
+                if retry_count > max_retries:
+                    print(f"[!] AlienVault: Rate limited (HTTP 429) - max retries exceeded")
+                    break
+                
+                # Exponential backoff: 5s, 10s, 20s
+                wait_time = 5 * (2 ** (retry_count - 1))
+                print(f"[!] AlienVault: Rate limited (HTTP 429) - waiting {wait_time}s before retry {retry_count}/{max_retries}")
+                time.sleep(wait_time)
+                continue
+            
             if resp.status_code != 200:
                 if resp.status_code == 404:
                     print("[!] AlienVault: Domain not found in OTX database")
@@ -246,6 +263,9 @@ def alienvault_urls(domain):
                     print(f"[!] AlienVault: HTTP {resp.status_code}")
                 break
 
+            # Reset retry count on success
+            retry_count = 0
+            
             data = resp.json()
             url_list = data.get('url_list', [])
 
@@ -260,6 +280,9 @@ def alienvault_urls(domain):
 
             page += 1
             api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}"
+            
+            # Add small delay between pages to avoid rate limiting
+            time.sleep(1)
 
         if not all_urls:
             print("[!] AlienVault: No URLs found (domain may not have threat intelligence data)")
