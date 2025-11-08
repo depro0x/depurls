@@ -409,6 +409,7 @@ def alienvault_urls(domain, api_key=None):
 
 def urlscan_urls(domain, api_key=None):
     all_urls = []
+    initial_status_code = None
 
     try:
         size = 1000
@@ -420,6 +421,8 @@ def urlscan_urls(domain, api_key=None):
 
         # Connection timeout: 60s, Reduced read timeout: 120s
         resp = requests.get(api, headers=headers or None, timeout=(60, 120))
+        initial_status_code = resp.status_code
+        
         if resp.status_code != 200:
             if resp.status_code == 401:
                 raise Exception(f"HTTP 401 - Invalid API key")
@@ -429,17 +432,23 @@ def urlscan_urls(domain, api_key=None):
                 raise Exception(f"HTTP 404 - Domain not found")
             else:
                 raise Exception(f"HTTP {resp.status_code} - Request failed")
-            return []
 
         data = resp.json()
 
         total = data.get('total', 0)
+        results_count = len(data.get('results', []))
+
+        # Debug: Track raw results vs filtered results
+        raw_results = 0
+        filtered_results = 0
 
         for result in data.get('results', []):
             try:
+                raw_results += 1
                 url = result['task']['url']
                 if is_valid_domain_url(url, domain):
                     all_urls.append(url)
+                    filtered_results += 1
             except Exception as e:
                 continue
 
@@ -470,9 +479,11 @@ def urlscan_urls(domain, api_key=None):
                     page_results = 0
                     for result in data.get('results', []):
                         try:
+                            raw_results += 1
                             url = result['task']['url']
                             if is_valid_domain_url(url, domain):
                                 all_urls.append(url)
+                                filtered_results += 1
                                 page_results += 1
                         except:
                             continue
@@ -487,10 +498,11 @@ def urlscan_urls(domain, api_key=None):
                 break
 
         if not all_urls:
-            raise Exception("No scan results found for this domain")
+            # Better error message with status code and debug info
+            raise Exception(f"HTTP {initial_status_code} - 0 URLs matched domain filter (total: {total}, raw results: {raw_results}, filtered: {filtered_results})")
         return all_urls
     except Exception as e:
-        if "HTTP" in str(e) or "scan results" in str(e):
+        if "HTTP" in str(e):
             raise
         raise Exception(f"Request failed - {str(e)}")
 
