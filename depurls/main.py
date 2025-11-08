@@ -408,100 +408,174 @@ def alienvault_urls(domain, api_key=None):
 
 
 def urlscan_urls(domain, api_key=None):
-    all_urls = []
+    all_urls_set = set()  # Use set to avoid duplicates across strategies
     initial_status_code = None
+    
+    headers = {}
+    if api_key:
+        headers['API-Key'] = api_key
 
     try:
-        size = 1000
-
-        # Use page.domain: for more precise matching (URLs actually on that domain)
-        api = f"https://urlscan.io/api/v1/search/?q=page.domain:{domain}&size={size}"
-        headers = {}
-        if api_key:
-            headers['API-Key'] = api_key
-
-        # Connection timeout: 60s, Reduced read timeout: 120s
-        resp = requests.get(api, headers=headers or None, timeout=(60, 120))
-        initial_status_code = resp.status_code
+        # Try multiple search strategies to maximize URL collection
+        search_strategies = [
+            {
+                'name': 'page.domain',
+                'query': f'page.domain:{domain}',
+                'description': 'URLs actually on the domain'
+            },
+            {
+                'name': 'domain',
+                'query': f'domain:{domain}',
+                'description': 'Pages mentioning the domain'
+            },
+            {
+                'name': 'page.url',
+                'query': f'page.url:*{domain}*',
+                'description': 'URLs containing domain string'
+            },
+            {
+                'name': 'task.domain',
+                'query': f'task.domain:{domain}',
+                'description': 'Scanned tasks for the domain'
+            }
+        ]
         
-        if resp.status_code != 200:
-            if resp.status_code == 401:
-                raise Exception(f"HTTP 401 - Invalid API key")
-            elif resp.status_code == 429:
-                raise Exception(f"HTTP 429 - Rate limit exceeded")
-            elif resp.status_code == 404:
-                raise Exception(f"HTTP 404 - Domain not found")
-            else:
-                raise Exception(f"HTTP {resp.status_code} - Request failed")
+        size = 10000
+        total_raw = 0
+        total_filtered = 0
+        strategy_results = {}
 
-        data = resp.json()
-
-        total = data.get('total', 0)
-        results_count = len(data.get('results', []))
-
-        # Debug: Track raw results vs filtered results
-        raw_results = 0
-        filtered_results = 0
-
-        for result in data.get('results', []):
+        for strategy in search_strategies:
             try:
-                raw_results += 1
-                url = result['task']['url']
-                if is_valid_domain_url(url, domain):
-                    all_urls.append(url)
-                    filtered_results += 1
+                api = f"https://urlscan.io/api/v1/search/?q={strategy['query']}&size={size}"
+                
+                # Connection timeout: 60s, Reduced read timeout: 120s
+                resp = requests.get(api, headers=headers or None, timeout=(60, 120))
+                
+                if initial_status_code is None:
+                    initial_status_code = resp.status_code
+                
+                if resp.status_code != 200:
+                    if resp.status_code == 401:
+                        raise Exception(f"HTTP 401 - Invalid API key")
+                    elif resp.status_code == 429:
+                        raise Exception(f"HTTP 429 - Rate limit exceeded")
+                    # For other errors, just skip this strategy
+                    strategy_results[strategy['name']] = 0
+                    continue
+
+                data = resp.json()
+                total = data.get('total', 0)
+                
+                raw_results = 0
+                filtered_results = 0
+                strategy_urls = set()
+
+                # Extract URLs from results
+                for result in data.get('results', []):
+                    try:
+                        raw_results += 1
+                        
+                        # Extract from task.url
+                        url = result.get('task', {}).get('url', '')
+                        if url and is_valid_domain_url(url, domain):
+                            strategy_urls.add(url)
+                            filtered_results += 1
+                        
+                        # Extract from page.url
+                        page = result.get('page', {})
+                        page_url = page.get('url', '')
+                        if page_url and page_url != url and is_valid_domain_url(page_url, domain):
+                            strategy_urls.add(page_url)
+                            filtered_results += 1
+                        
+                        # Extract from page.domain if it's a full URL
+                        page_domain = page.get('domain', '')
+                        if page_domain and '/' in page_domain and is_valid_domain_url(page_domain, domain):
+                            strategy_urls.add(page_domain)
+                            filtered_results += 1
+                            
+                    except Exception:
+                        continue
+
+                # Limited pagination for strategies with many results
+                page_count = 1
+                max_pages = 5  # Limited to avoid rate limiting
+                
+                while len(strategy_urls) < min(total, 10000) and page_count < max_pages and total > size:
+                    try:
+                        results = data.get('results', [])
+                        if not results:
+                            break
+
+                        last_result = results[-1]
+                        sort_value = last_result.get('sort', [])
+                        if len(sort_value) >= 2:
+                            search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
+                            api_paginated = f"https://urlscan.io/api/v1/search/?q={strategy['query']}&size={size}{search_after}"
+
+                            resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 120))
+                            if resp.status_code != 200:
+                                break
+
+                            data = resp.json()
+                            
+                            page_results = 0
+                            for result in data.get('results', []):
+                                try:
+                                    raw_results += 1
+                                    
+                                    url = result.get('task', {}).get('url', '')
+                                    if url and is_valid_domain_url(url, domain):
+                                        if url not in strategy_urls:
+                                            strategy_urls.add(url)
+                                            filtered_results += 1
+                                            page_results += 1
+                                    
+                                    page = result.get('page', {})
+                                    page_url = page.get('url', '')
+                                    if page_url and page_url != url and is_valid_domain_url(page_url, domain):
+                                        if page_url not in strategy_urls:
+                                            strategy_urls.add(page_url)
+                                            filtered_results += 1
+                                            page_results += 1
+                                except:
+                                    continue
+
+                            page_count += 1
+
+                            if page_results == 0:
+                                break
+                        else:
+                            break
+                    except Exception:
+                        break
+
+                # Merge strategy results into main set
+                all_urls_set.update(strategy_urls)
+                strategy_results[strategy['name']] = len(strategy_urls)
+                total_raw += raw_results
+                total_filtered += filtered_results
+                
+                # Small delay between strategies to avoid rate limiting
+                if strategy != search_strategies[-1]:
+                    time.sleep(1)
+                    
             except Exception as e:
+                # If it's a critical error, raise it
+                if "401" in str(e) or "429" in str(e):
+                    raise
+                # Otherwise skip this strategy
+                strategy_results[strategy['name']] = 0
                 continue
 
-        page_count = 1
-        max_pages = 100
-
-        while len(all_urls) < total and page_count < max_pages:
-            try:
-                # Get the last result from current data to build pagination cursor
-                results = data.get('results', [])
-                if not results:
-                    break
-
-                last_result = results[-1]
-                sort_value = last_result.get('sort', [])
-                if len(sort_value) >= 2:
-                    search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
-                    api_paginated = f"https://urlscan.io/api/v1/search/?q=page.domain:{domain}&size={size}{search_after}"
-
-                    # Connection timeout: 60s, Reduced read timeout: 120s for pagination
-                    resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 120))
-                    if resp.status_code != 200:
-                        break
-
-                    data = resp.json()  # Update data with NEW page
-                    
-                    # Now extract URLs from the NEW page
-                    page_results = 0
-                    for result in data.get('results', []):
-                        try:
-                            raw_results += 1
-                            url = result['task']['url']
-                            if is_valid_domain_url(url, domain):
-                                all_urls.append(url)
-                                filtered_results += 1
-                                page_results += 1
-                        except:
-                            continue
-
-                    page_count += 1
-
-                    if page_results == 0:
-                        break
-                else:
-                    break
-            except Exception as e:
-                break
-
-        if not all_urls:
+        if not all_urls_set:
             # Better error message with status code and debug info
-            raise Exception(f"HTTP {initial_status_code} - 0 URLs matched domain filter (total: {total}, raw results: {raw_results}, filtered: {filtered_results})")
-        return all_urls
+            strategies_tried = ', '.join([f"{k}={v}" for k, v in strategy_results.items()])
+            raise Exception(f"HTTP {initial_status_code or 'N/A'} - 0 URLs matched domain filter (strategies: {strategies_tried}, raw: {total_raw}, filtered: {total_filtered})")
+        
+        return list(all_urls_set)
+        
     except Exception as e:
         if "HTTP" in str(e):
             raise
