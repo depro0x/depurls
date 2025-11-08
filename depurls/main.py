@@ -254,6 +254,58 @@ def wayback_urls(domain):
     return all_urls
 
 
+def wayback_urls_fast(subdomain):
+    """Fast Wayback Machine fetch for individual subdomains.
+    
+    - Reduced timeout: 60s connection, 3min read (for bulk subdomain processing)
+    - Fetches without collapse (all snapshots)
+    - No progress indicator (cleaner for batch processing)
+    - Returns URLs for the exact subdomain only
+    """
+    all_urls_set = set()
+    
+    # Fetch without collapse for maximum URL coverage
+    api = f"http://web.archive.org/cdx/search/cdx?url={subdomain}/*&output=text&fl=original"
+    
+    try:
+        # Reduced timeout: 60s connection, 3min read (180s)
+        resp = requests.get(api, timeout=(60, 180), stream=True)
+        
+        if resp.status_code == 504:
+            # Don't retry for batch processing - skip and continue
+            raise Exception(f"HTTP 504 - Gateway timeout")
+        
+        if resp.status_code != 200:
+            if resp.status_code == 404:
+                # No results for this subdomain - not an error
+                return []
+            elif resp.status_code == 403:
+                raise Exception(f"HTTP 403 - Access forbidden")
+            else:
+                raise Exception(f"HTTP {resp.status_code} - Request failed")
+
+        # Read response
+        response_text = ""
+        for chunk in resp.iter_content(chunk_size=131072, decode_unicode=True):
+            if chunk:
+                response_text += chunk
+
+        # Parse URLs
+        lines = response_text.splitlines()
+        for line in lines:
+            url = line.strip()
+            if url and is_valid_domain_url(url, subdomain):
+                all_urls_set.add(url)
+
+    except requests.exceptions.Timeout:
+        raise Exception(f"Timeout (3min)")
+    except Exception as e:
+        # Re-raise with original message
+        raise
+
+    return list(all_urls_set)
+
+
 def commoncrawl_urls(domain):
     try:
         import json
@@ -945,6 +997,7 @@ def parse_args():
     parser.add_argument('--setup', action='store_true', help='Setup configuration for a domain')
     parser.add_argument('--update', action='store_true', help='Update depurls to the latest version from GitHub')
     parser.add_argument('-d', '--domain', help='Target domain')
+    parser.add_argument('-i', '--input', dest='input_file', help='Input file containing subdomains (one per line) - uses only Wayback Machine')
     parser.add_argument('-o', '--output', dest='output', help='Output file path for URLs')
     parser.add_argument('-w', '--workers', type=int, default=5, help='Number of concurrent worker threads')
     parser.add_argument('-p', '--providers', nargs='+',
@@ -975,6 +1028,206 @@ def main(argv=None):
     if not args.output:
         print("[!] Error: -o/--output is required for URL collection")
         sys.exit(1)
+
+    # Handle subdomain batch processing mode
+    if args.input_file:
+        if not os.path.exists(args.input_file):
+            print(f"[!] Error: Input file not found: {args.input_file}")
+            sys.exit(1)
+        
+        # Load subdomains from file
+        subdomains = []
+        with open(args.input_file, 'r') as f:
+            for line in f:
+                subdomain = line.strip()
+                if subdomain and not subdomain.startswith('#'):
+                    subdomains.append(subdomain)
+        
+        if not subdomains:
+            print(f"[!] Error: No subdomains found in {args.input_file}")
+            sys.exit(1)
+        
+        print(f"\n[=] Batch processing {len(subdomains)} subdomains with Wayback Machine")
+        print(f"[=] Timeout per subdomain: 3 minutes (reduced for batch processing)")
+        print(f"[=] Workers: {args.workers}\n")
+        
+        # Track stats
+        start_time = time.time()
+        successful = 0
+        failed = 0
+        total_urls_found = 0
+        
+        # Process subdomains concurrently
+        output_path = args.output
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            raw_path = os.path.join(output_dir, "urls_raw_subdomains.txt")
+        else:
+            raw_path = "urls_raw_subdomains.txt"
+        
+        # Clear raw file
+        open(raw_path, 'w').close()
+        
+        write_lock = Lock()
+        
+        # Process with thread pool
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
+        futures = {}
+        
+        for subdomain in subdomains:
+            futures[subdomain] = executor.submit(wayback_urls_fast, subdomain)
+        
+        # Process results as they complete
+        for subdomain, future in futures.items():
+            try:
+                urls_list = future.result(timeout=240)  # 4 min timeout per future (buffer over 3min read)
+                
+                if urls_list:
+                    print(f"[✓] {subdomain}: {len(urls_list)} URLs")
+                    successful += 1
+                    total_urls_found += len(urls_list)
+                    
+                    # Write to raw file
+                    with write_lock:
+                        with open(raw_path, 'a') as f:
+                            for url in urls_list:
+                                f.write(url.strip() + '\n')
+                else:
+                    print(f"[⊘] {subdomain}: 0 URLs")
+                    successful += 1
+                    
+            except concurrent.futures.TimeoutError:
+                print(f"[✗] {subdomain}: Timeout (4min)")
+                failed += 1
+            except Exception as e:
+                print(f"[✗] {subdomain}: {str(e)}")
+                failed += 1
+        
+        executor.shutdown(wait=True)
+        
+        print(f'\n[=] Processing complete: {successful} succeeded, {failed} failed')
+        print('[=] Deduplicating URLs...')
+        
+        # Load existing URLs from output file
+        existing_urls = set()
+        if os.path.exists(output_path):
+            try:
+                with open(output_path, 'r') as f:
+                    for line in f:
+                        url = line.rstrip()
+                        if url:
+                            existing_urls.add(url)
+            except Exception:
+                pass
+        
+        # Deduplicate new URLs
+        new_urls = set()
+        if os.path.exists(raw_path):
+            with open(raw_path, 'r') as f:
+                for line in f:
+                    url = line.rstrip()
+                    if url:
+                        new_urls.add(url)
+        
+        # Find truly new URLs
+        unique_new_urls = new_urls - existing_urls
+        
+        if existing_urls:
+            # Append mode
+            if unique_new_urls:
+                with open(output_path, 'a') as f:
+                    for url in sorted(unique_new_urls):
+                        f.write(url + '\n')
+                print(f"[+] Added {len(unique_new_urls)} new URLs (Total: {len(existing_urls) + len(unique_new_urls)})")
+            else:
+                print(f"[*] No new URLs (Total: {len(existing_urls)})")
+        else:
+            # New file
+            with open(output_path, 'w') as f:
+                for url in sorted(new_urls):
+                    f.write(url + '\n')
+            print(f"[+] Saved {len(new_urls)} URLs to {output_path}")
+        
+        # Cleanup
+        try:
+            if os.path.exists(raw_path):
+                os.unlink(raw_path)
+        except Exception:
+            pass
+        
+        # Calculate execution time
+        end_time = time.time()
+        elapsed_seconds = int(end_time - start_time)
+        hours = elapsed_seconds // 3600
+        minutes = (elapsed_seconds % 3600) // 60
+        seconds = elapsed_seconds % 60
+        
+        if hours > 0:
+            time_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            time_str = f"{minutes}m {seconds}s"
+        else:
+            time_str = f"{seconds}s"
+        
+        # Send Discord notification
+        try:
+            # Try to get webhook from config (use first subdomain's root domain if available)
+            root_domain = None
+            if subdomains:
+                parts = subdomains[0].split('.')
+                if len(parts) >= 2:
+                    root_domain = '.'.join(parts[-2:])
+            
+            webhook_url = ''
+            if root_domain:
+                domain_config = get_domain_config(root_domain)
+                webhook_url = domain_config.get('DISCORD_WEBHOOK', '')
+            
+            # Fallback to config.py
+            if not webhook_url:
+                try:
+                    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+                    config_path = os.path.join(repo_root, "config.py")
+                    spec = importlib.util.spec_from_file_location("config", config_path)
+                    config = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(config)
+                    
+                    default_channel = getattr(config, 'DISCORD_DEFAULT_CHANNEL', '')
+                    webhooks = getattr(config, 'DISCORD_WEBHOOKS', {})
+                    webhook_url = webhooks.get(default_channel, '')
+                except Exception:
+                    pass
+            
+            if webhook_url:
+                final_count = 0
+                if os.path.exists(output_path):
+                    with open(output_path, 'r') as f:
+                        for _ in f:
+                            final_count += 1
+                
+                new_unique = len(unique_new_urls) if unique_new_urls else 0
+                if not existing_urls:
+                    new_unique = final_count
+                
+                message = (
+                    f"**🎯 Subdomain Batch Complete**\n\n"
+                    f"**Subdomains Processed:** {len(subdomains)}\n"
+                    f"**Successful:** {successful}\n"
+                    f"**Failed:** {failed}\n"
+                    f"**Time:** {time_str}\n\n"
+                    f"**URLs Found:** {total_urls_found}\n"
+                    f"**Output:**\n"
+                    f"  • New Unique: {new_unique}\n"
+                    f"  • Total in File: {final_count}"
+                )
+                
+                payload = {"content": message}
+                requests.post(webhook_url, json=payload, timeout=(60, 900))
+        except Exception:
+            pass
+        
+        return
 
     if not args.domain:
         print("[!] Error: -d/--domain is required for URL collection")
