@@ -84,32 +84,56 @@ def get_domain_config(domain):
 
 
 def wayback_urls(domain):
+    """Fetch URLs from the Wayback Machine CDX API.
+
+    - Increases timeout to 15 minutes (900s)
+    - Prints a simple progress indicator in MB downloaded without extra deps
+    - If an error occurs mid-download, returns URLs parsed from the data downloaded so far
+    """
     temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt')
     all_urls = []
 
+    api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original"
+
+    # We'll accumulate the response text progressively so we can parse partial results on failure
+    response_text = ""
+    total_bytes = 0
+    start_time = time.time()
+    last_print = start_time
+
     try:
-        api = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original"
+        print("[*] Wayback: Downloading and processing data (up to ~15 minutes)...")
 
-        print(f"[*] Wayback: Downloading and processing data (this may take several minutes)...")
-
-        resp = requests.get(api, timeout=1000, stream=True)
+        # 15 minutes timeout
+        resp = requests.get(api, timeout=900, stream=True)
 
         if resp.status_code != 200:
             print(f"[!] Wayback: HTTP {resp.status_code}")
             return []
 
-        response_text = ""
-        total_bytes = 0
+        for chunk in resp.iter_content(chunk_size=131072, decode_unicode=True):  # 128 KiB
+            if not chunk:
+                continue
+            response_text += chunk
+            chunk_bytes = len(chunk.encode('utf-8'))
+            total_bytes += chunk_bytes
 
-        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=True):
-            if chunk:
-                response_text += chunk
-                chunk_bytes = len(chunk.encode('utf-8'))
-                total_bytes += chunk_bytes
+            # Lightweight progress: MB downloaded and speed
+            now = time.time()
+            if now - last_print >= 1.0:
+                mb = total_bytes / (1024 * 1024)
+                elapsed = max(now - start_time, 0.001)
+                speed = mb / elapsed  # MB/s
+                msg = f"[Wayback] Downloaded: {mb:.2f} MB | {speed:.2f} MB/s | Elapsed: {int(elapsed)}s"
+                print("\r" + msg, end="", flush=True)
+                last_print = now
+
+        # Final newline after progress updates
+        if total_bytes > 0:
+            print()
 
         lines = response_text.splitlines()
         unique_urls = set()
-
         for line in lines:
             url = line.strip()
             if url:
@@ -118,30 +142,33 @@ def wayback_urls(domain):
         all_urls = list(unique_urls)
         print(f"[*] Wayback: Found {len(all_urls)} unique URLs")
 
-        temp_file.close()
-        try:
-            os.unlink(temp_file.name)
-        except:
-            pass
-
         return all_urls
 
     except requests.exceptions.Timeout:
-        print("[!] Wayback: Request timed out after 10 minutes")
-        temp_file.close()
-        try:
-            os.unlink(temp_file.name)
-        except:
-            pass
+        # Parse partial data if any
+        print("\n[!] Wayback: Request timed out after 15 minutes — using partial data")
+        if response_text:
+            lines = response_text.splitlines()
+            unique_urls = {line.strip() for line in lines if line.strip()}
+            return list(unique_urls)
         return all_urls
     except Exception as e:
-        print(f"[!] Wayback: Error - {str(e)}")
-        temp_file.close()
+        # Parse partial data if any
+        print(f"\n[!] Wayback: Error — using partial data if available ({str(e)})")
+        if response_text:
+            lines = response_text.splitlines()
+            unique_urls = {line.strip() for line in lines if line.strip()}
+            return list(unique_urls)
+        return all_urls
+    finally:
+        try:
+            temp_file.close()
+        except Exception:
+            pass
         try:
             os.unlink(temp_file.name)
-        except:
+        except Exception:
             pass
-        return all_urls
 
 
 def commoncrawl_urls(domain):
