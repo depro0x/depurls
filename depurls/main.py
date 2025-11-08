@@ -258,8 +258,8 @@ def commoncrawl_urls(domain):
     try:
         import json
         collinfo_url = "https://index.commoncrawl.org/collinfo.json"
-        # Connection timeout: 60s, Read timeout: 15min
-        resp = requests.get(collinfo_url, timeout=(60, 900))
+        # Connection timeout: 60s, Reduced read timeout: 120s (was 900s)
+        resp = requests.get(collinfo_url, timeout=(60, 120))
         coll = resp.json()
 
         all_urls = set()
@@ -284,8 +284,8 @@ def commoncrawl_urls(domain):
 
                 index_url = f"{cdx_api}?url=*.{domain}/*&output=json&fl=url"
 
-                # Connection timeout: 60s, Read timeout: 15min
-                resp = requests.get(index_url, timeout=(60, 900), stream=True)
+                # Connection timeout: 60s, Reduced read timeout: 300s for larger indexes
+                resp = requests.get(index_url, timeout=(60, 300), stream=True)
 
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line:
@@ -418,8 +418,8 @@ def urlscan_urls(domain, api_key=None):
         if api_key:
             headers['API-Key'] = api_key
 
-        # Connection timeout: 60s, Read timeout: 15min
-        resp = requests.get(api, headers=headers or None, timeout=(60, 900))
+        # Connection timeout: 60s, Reduced read timeout: 120s
+        resp = requests.get(api, headers=headers or None, timeout=(60, 120))
         if resp.status_code != 200:
             if resp.status_code == 401:
                 raise Exception(f"HTTP 401 - Invalid API key")
@@ -459,8 +459,8 @@ def urlscan_urls(domain, api_key=None):
                     search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
                     api_paginated = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}{search_after}"
 
-                    # Connection timeout: 60s, Read timeout: 15min
-                    resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 900))
+                    # Connection timeout: 60s, Reduced read timeout: 120s for pagination
+                    resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 120))
                     if resp.status_code != 200:
                         break
 
@@ -501,8 +501,8 @@ def virustotal_urls(domain, api_key):
 
     try:
         api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={domain}"
-        # Connection timeout: 60s, Read timeout: 15min
-        resp = requests.get(api, timeout=(60, 900))
+        # Connection timeout: 60s, Reduced read timeout: 120s
+        resp = requests.get(api, timeout=(60, 120))
 
         if resp.status_code == 200:
             data = resp.json()
@@ -533,8 +533,8 @@ def virustotal_urls(domain, api_key):
             try:
                 time.sleep(0.5)
                 api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={subdomain}"
-                # Connection timeout: 60s, Read timeout: 15min
-                resp = requests.get(api, timeout=(60, 900))
+                # Connection timeout: 60s, Reduced read timeout: 120s
+                resp = requests.get(api, timeout=(60, 120))
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -583,8 +583,8 @@ def shodan_urls(domain, api_key):
         for query in search_queries:
             try:
                 api_url = f"https://api.shodan.io/shodan/host/search?key={api_key}&query={query}"
-                # Connection timeout: 60s, Read timeout: 15min
-                resp = requests.get(api_url, timeout=(60, 900))
+                # Connection timeout: 60s, Reduced read timeout: 120s
+                resp = requests.get(api_url, timeout=(60, 120))
                 
                 if resp.status_code == 401:
                     raise Exception("HTTP 401 - Invalid API key")
