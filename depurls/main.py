@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 
 def is_valid_domain_url(url, target_domain):
-    """Check if URL belongs to the target domain or its subdomains."""
+    """Check if URL belongs to the target domain or its subdomains (including nested subdomains)."""
     try:
         parsed = urlparse(url)
         hostname = parsed.netloc.lower()
@@ -23,10 +23,17 @@ def is_valid_domain_url(url, target_domain):
         if ':' in hostname:
             hostname = hostname.split(':')[0]
         
+        # Remove www. prefix for comparison (optional normalization)
+        # hostname = hostname.removeprefix('www.')  # Python 3.9+
+        
         target_domain_lower = target_domain.lower()
         
-        # Exact match or subdomain match
-        if hostname == target_domain_lower or hostname.endswith('.' + target_domain_lower):
+        # Exact match
+        if hostname == target_domain_lower:
+            return True
+        
+        # Subdomain match (handles all levels: api.example.com, api.v1.abd.example.com, etc.)
+        if hostname.endswith('.' + target_domain_lower):
             return True
         
         return False
