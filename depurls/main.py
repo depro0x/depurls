@@ -178,7 +178,7 @@ def commoncrawl_urls(domain):
     try:
         import json
         collinfo_url = "https://index.commoncrawl.org/collinfo.json"
-        resp = requests.get(collinfo_url, timeout=30)
+        resp = requests.get(collinfo_url, timeout=900)
         coll = resp.json()
 
         all_urls = set()
@@ -204,7 +204,7 @@ def commoncrawl_urls(domain):
 
                 index_url = f"{cdx_api}?url=*.{domain}/*&output=json&fl=url"
 
-                resp = requests.get(index_url, timeout=30, stream=True)
+                resp = requests.get(index_url, timeout=900, stream=True)
 
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line:
@@ -238,7 +238,7 @@ def alienvault_urls(domain):
     try:
         page = 1
         while True:
-            resp = requests.get(api, timeout=1000)
+            resp = requests.get(api, timeout=900)
             if resp.status_code != 200:
                 if resp.status_code == 404:
                     print("[!] AlienVault: Domain not found in OTX database")
@@ -280,7 +280,7 @@ def urlscan_urls(domain, api_key=None):
         if api_key:
             headers['API-Key'] = api_key
 
-        resp = requests.get(api, headers=headers or None, timeout=30)
+        resp = requests.get(api, headers=headers or None, timeout=900)
         if resp.status_code != 200:
             print(f"[!] URLScan: HTTP {resp.status_code}")
             return []
@@ -312,7 +312,7 @@ def urlscan_urls(domain, api_key=None):
                     search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
                     api_paginated = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}{search_after}"
 
-                    resp = requests.get(api_paginated, headers=headers or None, timeout=30)
+                    resp = requests.get(api_paginated, headers=headers or None, timeout=900)
                     if resp.status_code != 200:
                         break
 
@@ -350,7 +350,7 @@ def virustotal_urls(domain, api_key):
 
     try:
         api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={domain}"
-        resp = requests.get(api, timeout=30)
+        resp = requests.get(api, timeout=900)
 
         if resp.status_code == 200:
             data = resp.json()
@@ -382,7 +382,7 @@ def virustotal_urls(domain, api_key):
             try:
                 time.sleep(0.5)
                 api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={subdomain}"
-                resp = requests.get(api, timeout=30)
+                resp = requests.get(api, timeout=900)
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -419,7 +419,7 @@ def update_tool():
              "git+https://github.com/depro0x/depurls.git"],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=900
         )
         
         if result.returncode == 0:
@@ -575,8 +575,8 @@ def main(argv=None):
 
     for provider_name, future in futures.items():
         try:
-            # Wayback needs 15+ minutes, others are faster
-            timeout = 1000 if provider_name == 'wayback' else 300
+            # All services now have 15 minute timeout
+            timeout = 900
             urls_list = future.result(timeout=timeout)
             
             if urls_list:
@@ -591,8 +591,7 @@ def main(argv=None):
             else:
                 print(f"[!] {provider_name.title()}: Found 0 URLs (check domain spelling, API keys, or rate limits)")
         except concurrent.futures.TimeoutError:
-            timeout_mins = 16 if provider_name == 'wayback' else 5
-            print(f"[!] {provider_name.title()}: Timeout after {timeout_mins} minutes")
+            print(f"[!] {provider_name.title()}: Timeout after 15 minutes")
         except Exception as e:
             print(f"[!] {provider_name.title()}: Error - {str(e)}")
 
@@ -660,7 +659,7 @@ def main(argv=None):
             )
 
             payload = {"content": message}
-            requests.post(webhook_url, json=payload, timeout=10)
+            requests.post(webhook_url, json=payload, timeout=900)
     except Exception:
         pass
 
