@@ -324,6 +324,7 @@ def alienvault_urls(domain, api_key=None):
         page = 1
         retry_count = 0
         max_retries = 3
+        max_pages = 20  # Limit to prevent infinite pagination
         # Wait times: 30s, 1 minute, 2 minutes
         wait_times = [30, 60, 120]
         
@@ -332,60 +333,76 @@ def alienvault_urls(domain, api_key=None):
         if api_key:
             headers['X-OTX-API-KEY'] = api_key
         
-        while True:
-            # Connection timeout: 60s, Read timeout: 15min
-            resp = requests.get(api, headers=headers if headers else None, timeout=(60, 900))
-            
-            if resp.status_code == 429:
-                # Rate limited - wait and retry
-                if retry_count >= max_retries:
-                    raise Exception(f"HTTP 429 - Rate limit exceeded after {max_retries} retries")
-                    break
+        while page <= max_pages:
+            try:
+                # Connection timeout: 60s, Read timeout: 2min (reduced to prevent long hangs)
+                resp = requests.get(api, headers=headers if headers else None, timeout=(60, 120))
                 
-                wait_time = wait_times[retry_count]
-                retry_count += 1
-                time.sleep(wait_time)
-                continue
-            
-            if resp.status_code != 200:
-                if resp.status_code == 404:
-                    raise Exception(f"HTTP 404 - Domain not found in OTX database")
-                elif resp.status_code == 403:
-                    raise Exception(f"HTTP 403 - Invalid or expired API key")
-                else:
-                    raise Exception(f"HTTP {resp.status_code} - Request failed")
-                break
+                if resp.status_code == 429:
+                    # Rate limited - wait and retry
+                    if retry_count >= max_retries:
+                        # Return partial results if we have any
+                        if all_urls:
+                            return all_urls
+                        raise Exception(f"HTTP 429 - Rate limit exceeded after {max_retries} retries")
+                    
+                    wait_time = wait_times[retry_count]
+                    retry_count += 1
+                    time.sleep(wait_time)
+                    continue
+                
+                if resp.status_code != 200:
+                    # Return partial results if we have any
+                    if all_urls:
+                        return all_urls
+                    if resp.status_code == 404:
+                        raise Exception(f"HTTP 404 - Domain not found in OTX database")
+                    elif resp.status_code == 403:
+                        raise Exception(f"HTTP 403 - Invalid or expired API key")
+                    else:
+                        raise Exception(f"HTTP {resp.status_code} - Request failed")
 
-            # Reset retry count on success
-            retry_count = 0
-            
-            data = resp.json()
-            url_list = data.get('url_list', [])
+                # Reset retry count on success
+                retry_count = 0
+                
+                data = resp.json()
+                url_list = data.get('url_list', [])
 
-            if not url_list:
-                break
+                if not url_list:
+                    break
 
-            # Filter URLs to only include target domain
-            for entry in url_list:
-                url = entry.get('url', '')
-                if url and is_valid_domain_url(url, domain):
-                    all_urls.append(url)
+                # Filter URLs to only include target domain
+                for entry in url_list:
+                    url = entry.get('url', '')
+                    if url and is_valid_domain_url(url, domain):
+                        all_urls.append(url)
 
-            has_next = data.get('has_next', False)
-            if not has_next:
-                break
+                has_next = data.get('has_next', False)
+                if not has_next:
+                    break
 
-            page += 1
-            api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}"
-            
-            # Add small delay between pages to avoid rate limiting
-            time.sleep(1)
+                page += 1
+                api = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}"
+                
+                # Add small delay between pages to avoid rate limiting
+                time.sleep(1)
+                
+            except requests.exceptions.Timeout:
+                # Return partial results if we have any
+                if all_urls:
+                    return all_urls
+                raise Exception(f"Timeout after page {page}")
+            except requests.exceptions.RequestException as e:
+                # Return partial results on network errors
+                if all_urls:
+                    return all_urls
+                raise
 
         if not all_urls:
             raise Exception("No threat intelligence data available for this domain")
         return all_urls
     except Exception as e:
-        if "HTTP" in str(e) or "threat intelligence" in str(e):
+        if "HTTP" in str(e) or "threat intelligence" in str(e) or "Timeout" in str(e):
             raise
         raise Exception(f"Request failed - {str(e)}")
 
@@ -1017,12 +1034,19 @@ def main(argv=None):
                 print(f"[✗] {provider_name.title()}: 0 URLs")
                 service_status[provider_name] = 'completed (0 URLs)'
         except concurrent.futures.TimeoutError:
-            print(f"[✗] {provider_name.title()}: Timeout (16min)")
+            # Service timeout - check if there are partial results in the future
+            print(f"[✗] {provider_name.title()}: Timeout (16min) - service exceeded time limit")
             service_status[provider_name] = 'timeout (16min)'
         except Exception as e:
             error_msg = str(e)
-            print(f"[✗] {provider_name.title()}: {error_msg}")
-            service_status[provider_name] = f'error ({error_msg})'
+            # Check if this is a partial success (URLs collected before error)
+            if "partial:" in error_msg.lower():
+                # Extract URL count and save them
+                print(f"[⚠] {provider_name.title()}: {error_msg}")
+                service_status[provider_name] = f'partial ({error_msg})'
+            else:
+                print(f"[✗] {provider_name.title()}: {error_msg}")
+                service_status[provider_name] = f'error ({error_msg})'
 
     executor.shutdown(wait=True)
     
