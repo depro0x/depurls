@@ -268,16 +268,18 @@ def urlscan_urls(domain, api_key=None):
 
         resp = requests.get(api, headers=headers or None, timeout=30)
         if resp.status_code != 200:
+            print(f"[!] URLScan: HTTP {resp.status_code}")
             return []
 
         data = resp.json()
 
         total = data.get('total', 0)
+        print(f"[*] URLScan: API reports {total} total results available")
 
         for result in data.get('results', []):
             try:
                 all_urls.append(result['task']['url'])
-            except:
+            except Exception as e:
                 continue
 
         page_count = 1
@@ -285,6 +287,7 @@ def urlscan_urls(domain, api_key=None):
 
         while len(all_urls) < total and page_count < max_pages:
             try:
+                # Get the last result from current data to build pagination cursor
                 results = data.get('results', [])
                 if not results:
                     break
@@ -299,8 +302,9 @@ def urlscan_urls(domain, api_key=None):
                     if resp.status_code != 200:
                         break
 
-                    data = resp.json()
-
+                    data = resp.json()  # Update data with NEW page
+                    
+                    # Now extract URLs from the NEW page
                     page_results = 0
                     for result in data.get('results', []):
                         try:
@@ -315,11 +319,14 @@ def urlscan_urls(domain, api_key=None):
                         break
                 else:
                     break
-            except Exception:
+            except Exception as e:
+                print(f"[!] URLScan pagination error: {e}")
                 break
 
+        print(f"[*] URLScan: Fetched {len(all_urls)} URLs from {page_count} page(s)")
         return all_urls
-    except Exception:
+    except Exception as e:
+        print(f"[!] URLScan: Error - {e}")
         return []
 
 
