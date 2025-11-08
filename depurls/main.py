@@ -666,25 +666,73 @@ def main(argv=None):
     executor.shutdown(wait=True)
 
     print('\n[=] Deduplicating URLs...')
+    
+    # Load existing URLs from output file if it exists
+    existing_urls = set()
+    if os.path.exists(output_path):
+        print(f"[*] Output file exists, loading existing URLs to avoid duplicates...")
+        try:
+            with open(output_path, 'r') as f:
+                for line in f:
+                    url = line.rstrip()
+                    if url:
+                        existing_urls.add(url)
+            print(f"[*] Loaded {len(existing_urls)} existing URLs from {output_path}")
+        except Exception as e:
+            print(f"[!] Warning: Could not read existing file: {e}")
+    
+    # Deduplicate and merge with existing URLs
     try:
-        res = subprocess.run(['sort', '-u', raw_path, '-o', output_path], check=False)
-        if res.returncode == 0:
-            final_count = sum(1 for _ in open(output_path))
-            print(f"[*] Saved {final_count} unique URLs to {output_path}")
+        # Read new URLs from raw file
+        new_urls = set()
+        with open(raw_path, 'r') as f:
+            for line in f:
+                url = line.rstrip()
+                if url:
+                    new_urls.add(url)
+        
+        # Find truly new URLs (not in existing file)
+        unique_new_urls = new_urls - existing_urls
+        
+        if existing_urls:
+            # Append mode: add only new unique URLs
+            if unique_new_urls:
+                with open(output_path, 'a') as f:
+                    for url in sorted(unique_new_urls):
+                        f.write(url + '\n')
+                print(f"[*] Appended {len(unique_new_urls)} new unique URLs to {output_path}")
+                print(f"[*] Total URLs in file: {len(existing_urls) + len(unique_new_urls)}")
+            else:
+                print(f"[*] No new URLs to append (all URLs already exist in {output_path})")
+                print(f"[*] Total URLs in file: {len(existing_urls)}")
         else:
-            raise RuntimeError('sort returned non-zero')
-    except Exception:
-        print('[!] System sort failed — using Python deduplication')
-        seen = set()
-        final_count = 0
-        with open(raw_path, 'r') as rf, open(output_path, 'w') as of:
-            for line in rf:
-                u = line.rstrip()
-                if u and u not in seen:
-                    of.write(u + "\n")
-                    seen.add(u)
-                    final_count += 1
-        print(f"[*] Saved {final_count} unique URLs to {output_path}")
+            # New file: write all unique URLs
+            with open(output_path, 'w') as f:
+                for url in sorted(new_urls):
+                    f.write(url + '\n')
+            print(f"[*] Saved {len(new_urls)} unique URLs to {output_path}")
+    except Exception as e:
+        print(f'[!] Deduplication error: {e}')
+        print('[!] Falling back to system sort deduplication')
+        try:
+            res = subprocess.run(['sort', '-u', raw_path, '-o', output_path], check=False)
+            if res.returncode == 0:
+                final_count = sum(1 for _ in open(output_path))
+                print(f"[*] Saved {final_count} unique URLs to {output_path}")
+            else:
+                raise RuntimeError('sort returned non-zero')
+        except Exception:
+            print('[!] System sort also failed — using basic Python deduplication')
+            seen = set()
+            final_count = 0
+            with open(raw_path, 'r') as rf, open(output_path, 'w') as of:
+                for line in rf:
+                    u = line.rstrip()
+                    if u and u not in seen:
+                        of.write(u + "\n")
+                        seen.add(u)
+                        final_count += 1
+            print(f"[*] Saved {final_count} unique URLs to {output_path}")
 
     print('\n[Summary] Total URLs found per service:')
     for svc, cnt in per_service_counts.items():
