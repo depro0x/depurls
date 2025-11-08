@@ -10,6 +10,28 @@ import concurrent.futures
 from threading import Lock
 import json
 from pathlib import Path
+from urllib.parse import urlparse
+
+
+def is_valid_domain_url(url, target_domain):
+    """Check if URL belongs to the target domain or its subdomains."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.netloc.lower()
+        
+        # Remove port if present
+        if ':' in hostname:
+            hostname = hostname.split(':')[0]
+        
+        target_domain_lower = target_domain.lower()
+        
+        # Exact match or subdomain match
+        if hostname == target_domain_lower or hostname.endswith('.' + target_domain_lower):
+            return True
+        
+        return False
+    except Exception:
+        return False
 
 
 def save_urls(urls, output_path):
@@ -90,6 +112,7 @@ def wayback_urls(domain):
     - Prints a simple progress indicator in MB downloaded without extra deps
     - If an error occurs mid-download, returns URLs parsed from the data downloaded so far
     - Uses collapse=urlkey to reduce duplicate snapshots at source
+    - Filters URLs to only include target domain and subdomains
     """
     temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt')
     all_urls = []
@@ -136,14 +159,17 @@ def wayback_urls(domain):
 
         lines = response_text.splitlines()
         unique_urls = set()
+        filtered_count = 0
         for line in lines:
             url = line.strip()
-            if url:
+            if url and is_valid_domain_url(url, domain):
                 unique_urls.add(url)
+            elif url:
+                filtered_count += 1
 
         all_urls = list(unique_urls)
         mb_downloaded = total_bytes / (1024 * 1024)
-        print(f"[*] Wayback: Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len(all_urls)} unique URLs")
+        print(f"[*] Wayback: Downloaded {mb_downloaded:.2f} MB, parsed {len(lines)} lines, found {len(all_urls)} unique URLs (filtered {filtered_count} non-matching)")
 
         return all_urls
 
@@ -152,7 +178,7 @@ def wayback_urls(domain):
         print("\n[!] Wayback: Request timed out after 15 minutes — using partial data")
         if response_text:
             lines = response_text.splitlines()
-            unique_urls = {line.strip() for line in lines if line.strip()}
+            unique_urls = {line.strip() for line in lines if line.strip() and is_valid_domain_url(line.strip(), domain)}
             return list(unique_urls)
         return all_urls
     except Exception as e:
@@ -160,7 +186,7 @@ def wayback_urls(domain):
         print(f"\n[!] Wayback: Error — using partial data if available ({str(e)})")
         if response_text:
             lines = response_text.splitlines()
-            unique_urls = {line.strip() for line in lines if line.strip()}
+            unique_urls = {line.strip() for line in lines if line.strip() and is_valid_domain_url(line.strip(), domain)}
             return list(unique_urls)
         return all_urls
     finally:
@@ -212,12 +238,15 @@ def commoncrawl_urls(domain):
                     try:
                         obj = json.loads(line)
                         if 'url' in obj:
-                            all_urls.add(obj['url'])
+                            url = obj['url']
+                            if is_valid_domain_url(url, domain):
+                                all_urls.add(url)
                     except Exception:
                         if '"url":"' in line:
                             try:
                                 url = line.split('"url":"')[1].split('"')[0]
-                                all_urls.add(url)
+                                if is_valid_domain_url(url, domain):
+                                    all_urls.add(url)
                             except Exception:
                                 pass
             except Exception:
@@ -272,7 +301,11 @@ def alienvault_urls(domain):
             if not url_list:
                 break
 
-            all_urls.extend([entry['url'] for entry in url_list])
+            # Filter URLs to only include target domain
+            for entry in url_list:
+                url = entry.get('url', '')
+                if url and is_valid_domain_url(url, domain):
+                    all_urls.append(url)
 
             has_next = data.get('has_next', False)
             if not has_next:
@@ -315,7 +348,9 @@ def urlscan_urls(domain, api_key=None):
 
         for result in data.get('results', []):
             try:
-                all_urls.append(result['task']['url'])
+                url = result['task']['url']
+                if is_valid_domain_url(url, domain):
+                    all_urls.append(url)
             except Exception as e:
                 continue
 
@@ -345,8 +380,10 @@ def urlscan_urls(domain, api_key=None):
                     page_results = 0
                     for result in data.get('results', []):
                         try:
-                            all_urls.append(result['task']['url'])
-                            page_results += 1
+                            url = result['task']['url']
+                            if is_valid_domain_url(url, domain):
+                                all_urls.append(url)
+                                page_results += 1
                         except:
                             continue
 
@@ -384,12 +421,12 @@ def virustotal_urls(domain, api_key):
 
             for url_entry in data.get('detected_urls', []):
                 url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
-                if url:
+                if url and is_valid_domain_url(url, domain):
                     all_urls.add(url)
 
             for url_entry in data.get('undetected_urls', []):
                 url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
-                if url:
+                if url and is_valid_domain_url(url, domain):
                     all_urls.add(url)
         elif resp.status_code == 403:
             print("[!] VirusTotal: API key invalid or rate limit exceeded")
@@ -412,12 +449,12 @@ def virustotal_urls(domain, api_key):
 
                     for url_entry in data.get('detected_urls', []):
                         url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
-                        if url:
+                        if url and is_valid_domain_url(url, domain):
                             all_urls.add(url)
 
                     for url_entry in data.get('undetected_urls', []):
                         url = url_entry[0] if isinstance(url_entry, list) else url_entry.get('url')
-                        if url:
+                        if url and is_valid_domain_url(url, domain):
                             all_urls.add(url)
             except:
                 continue
