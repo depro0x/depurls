@@ -13,6 +13,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+# Timeout Configuration:
+# - requests.get(timeout=(connect_timeout, read_timeout)) 
+#   * connect_timeout: 60s (1 minute) for all services
+#   * read_timeout: 900s (15 minutes) for all services
+# - future.result(timeout=X): maximum wait time for service completion
+#   * All services: 960s (16 minutes) to allow for full read timeout + buffer
+
+
 def is_valid_domain_url(url, target_domain):
     """Check if URL belongs to the target domain or its subdomains (including nested subdomains)."""
     try:
@@ -123,13 +131,13 @@ def get_domain_config(domain):
 def wayback_urls(domain):
     """Fetch URLs from the Wayback Machine CDX API.
 
-    - Increases timeout to 15 minutes (900s) per request
+    - Connection timeout: 60s, Read timeout: 15 minutes
     - Prints a simple progress indicator in MB downloaded without extra deps
     - If an error occurs mid-download, returns URLs parsed from the data downloaded so far
     - Fetches URLs TWICE: once with collapse=urlkey, once without collapse
     - Sorts and deduplicates at file level to maximize unique URL collection
     - Filters URLs to only include target domain and subdomains
-    - Retries on HTTP 504 Gateway Timeout errors
+    - Retries on HTTP 504 Gateway Timeout errors with exponential backoff
     """
     all_urls_set = set()
     
@@ -149,7 +157,7 @@ def wayback_urls(domain):
 
     # Retry configuration for 504 errors
     max_retries = 3
-    wait_times = [60, 120, 240]  # 1min, 2min, 4min
+    wait_times = [30, 60, 120]  # 30s, 1min, 2min
     
     for config in fetch_configs:
         api = config['api']
@@ -166,8 +174,8 @@ def wayback_urls(domain):
         try:
             while retry_count <= max_retries:
                 try:
-                    # 15 minutes timeout
-                    resp = requests.get(api, timeout=900, stream=True)
+                    # Connection timeout: 60s, Read timeout: 15min
+                    resp = requests.get(api, timeout=(60, 900), stream=True)
 
                     if resp.status_code == 504:
                         # Gateway Timeout - retry
@@ -250,7 +258,8 @@ def commoncrawl_urls(domain):
     try:
         import json
         collinfo_url = "https://index.commoncrawl.org/collinfo.json"
-        resp = requests.get(collinfo_url, timeout=900)
+        # Connection timeout: 60s, Read timeout: 15min
+        resp = requests.get(collinfo_url, timeout=(60, 900))
         coll = resp.json()
 
         all_urls = set()
@@ -275,7 +284,8 @@ def commoncrawl_urls(domain):
 
                 index_url = f"{cdx_api}?url=*.{domain}/*&output=json&fl=url"
 
-                resp = requests.get(index_url, timeout=900, stream=True)
+                # Connection timeout: 60s, Read timeout: 15min
+                resp = requests.get(index_url, timeout=(60, 900), stream=True)
 
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line:
@@ -314,8 +324,8 @@ def alienvault_urls(domain, api_key=None):
         page = 1
         retry_count = 0
         max_retries = 3
-        # Wait times: 1 minute, 2 minutes, 5 minutes
-        wait_times = [60, 120, 300]
+        # Wait times: 30s, 1 minute, 2 minutes
+        wait_times = [30, 60, 120]
         
         # Setup headers with API key if provided
         headers = {}
@@ -323,7 +333,8 @@ def alienvault_urls(domain, api_key=None):
             headers['X-OTX-API-KEY'] = api_key
         
         while True:
-            resp = requests.get(api, headers=headers if headers else None, timeout=900)
+            # Connection timeout: 60s, Read timeout: 15min
+            resp = requests.get(api, headers=headers if headers else None, timeout=(60, 900))
             
             if resp.status_code == 429:
                 # Rate limited - wait and retry
@@ -390,7 +401,8 @@ def urlscan_urls(domain, api_key=None):
         if api_key:
             headers['API-Key'] = api_key
 
-        resp = requests.get(api, headers=headers or None, timeout=900)
+        # Connection timeout: 60s, Read timeout: 15min
+        resp = requests.get(api, headers=headers or None, timeout=(60, 900))
         if resp.status_code != 200:
             if resp.status_code == 401:
                 raise Exception(f"HTTP 401 - Invalid API key")
@@ -430,7 +442,8 @@ def urlscan_urls(domain, api_key=None):
                     search_after = f"&search_after={sort_value[0]},{sort_value[1]}"
                     api_paginated = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size={size}{search_after}"
 
-                    resp = requests.get(api_paginated, headers=headers or None, timeout=900)
+                    # Connection timeout: 60s, Read timeout: 15min
+                    resp = requests.get(api_paginated, headers=headers or None, timeout=(60, 900))
                     if resp.status_code != 200:
                         break
 
@@ -471,7 +484,8 @@ def virustotal_urls(domain, api_key):
 
     try:
         api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={domain}"
-        resp = requests.get(api, timeout=900)
+        # Connection timeout: 60s, Read timeout: 15min
+        resp = requests.get(api, timeout=(60, 900))
 
         if resp.status_code == 200:
             data = resp.json()
@@ -502,7 +516,8 @@ def virustotal_urls(domain, api_key):
             try:
                 time.sleep(0.5)
                 api = f"https://www.virustotal.com/vtapi/v2/domain/report?apikey={api_key}&domain={subdomain}"
-                resp = requests.get(api, timeout=900)
+                # Connection timeout: 60s, Read timeout: 15min
+                resp = requests.get(api, timeout=(60, 900))
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -551,7 +566,8 @@ def shodan_urls(domain, api_key):
         for query in search_queries:
             try:
                 api_url = f"https://api.shodan.io/shodan/host/search?key={api_key}&query={query}"
-                resp = requests.get(api_url, timeout=900)
+                # Connection timeout: 60s, Read timeout: 15min
+                resp = requests.get(api_url, timeout=(60, 900))
                 
                 if resp.status_code == 401:
                     raise Exception("HTTP 401 - Invalid API key")
@@ -967,12 +983,14 @@ def main(argv=None):
 
     print()  # Empty line before results start appearing
 
-    # Process results as they complete
+    # Process results as they complete with unified timeout
+    # 16 minutes allows for 15min read timeout + 1min connection + buffer
+    service_timeout = 960  # 16 minutes for all services
+    
     for provider_name, future in futures.items():
         try:
-            # All services now have 15 minute timeout
-            timeout = 900
-            urls_list = future.result(timeout=timeout)
+            # Use unified timeout for all services
+            urls_list = future.result(timeout=service_timeout)
             
             if urls_list:
                 print(f"[✓] {provider_name.title()}: {len(urls_list)} URLs")
@@ -988,8 +1006,8 @@ def main(argv=None):
                 print(f"[✗] {provider_name.title()}: 0 URLs")
                 service_status[provider_name] = 'completed (0 URLs)'
         except concurrent.futures.TimeoutError:
-            print(f"[✗] {provider_name.title()}: Timeout (15min)")
-            service_status[provider_name] = 'timeout (15min)'
+            print(f"[✗] {provider_name.title()}: Timeout (16min)")
+            service_status[provider_name] = 'timeout (16min)'
         except Exception as e:
             error_msg = str(e)
             print(f"[✗] {provider_name.title()}: {error_msg}")
@@ -1126,7 +1144,8 @@ def main(argv=None):
             )
 
             payload = {"content": message}
-            requests.post(webhook_url, json=payload, timeout=900)
+            # Discord webhook: Connection timeout: 60s, Read timeout: 15min
+            requests.post(webhook_url, json=payload, timeout=(60, 900))
     except Exception:
         pass
 
